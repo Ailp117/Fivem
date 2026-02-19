@@ -1,0 +1,33 @@
+Ox Inventory - Benoetigte Schmuggel-Items
+=========================================
+
+Diese Items werden vom Script in Config.CargoTypes verwendet
+und muessen in ox_inventory/data/items.lua vorhanden sein:
+
+1. specialcargo
+   Label: Spezialfracht
+2. electronics
+   Label: Elektronik
+3. medical
+   Label: Medizinische Ware
+4. tobacco
+   Label: Tabak & Alkohol
+5. counterfeit
+   Label: Faelschungen
+6. gems
+   Label: Edelsteine
+7. weapons
+   Label: Waffen & Munition
+8. drugs
+   Label: Drogen
+
+Beispiel-Eintraege fuer ox_inventory/data/items.lua:
+
+['specialcargo'] = { label = 'Spezialfracht', weight = 1000, stack = true, close = true, consume = 0 },
+['electronics'] = { label = 'Elektronik', weight = 1000, stack = true, close = true, consume = 0 },
+['medical'] = { label = 'Medizinische Ware', weight = 1000, stack = true, close = true, consume = 0 },
+['tobacco'] = { label = 'Tabak & Alkohol', weight = 1000, stack = true, close = true, consume = 0 },
+['counterfeit'] = { label = 'Faelschungen', weight = 1000, stack = true, close = true, consume = 0 },
+['gems'] = { label = 'Edelsteine', weight = 1000, stack = true, close = true, consume = 0 },
+['weapons'] = { label = 'Waffen & Munition', weight = 1000, stack = true, close = true, consume = 0 },
+['drugs'] = { label = 'Drogen', weight = 1000, stack = true, close = true, consume = 0 },
