@@ -2,8 +2,10 @@
 local ESX = exports['es_extended']:getSharedObject()
 
 Warehouses = {}
-WarehouseInventory = {}
 WarehouseStats = {}
+ActiveSellLoads = {}
+SellLoadBySource = {}
+ActiveSourceMissions = {}
 
 local function notifyPlayer(playerId, message, notifType, duration)
     TriggerClientEvent('warehouse:client:notify', playerId, message, notifType or 'inform', duration)
@@ -78,6 +80,24 @@ local function getCargoItemName(cargoType)
     return cargoData.item or cargoType
 end
 
+local function getInventoryItemCount(inventoryId, itemName)
+    local okGet, getResult = pcall(function()
+        return exports.ox_inventory:GetItem(inventoryId, itemName, nil, true)
+    end)
+    if okGet and type(getResult) == 'number' then
+        return getResult
+    end
+
+    local okSearch, searchResult = pcall(function()
+        return exports.ox_inventory:Search(inventoryId, 'count', itemName)
+    end)
+    if okSearch and type(searchResult) == 'number' then
+        return searchResult
+    end
+
+    return 0
+end
+
 local RegisteredWarehouseStashes = {}
 
 local function getWarehouseStashId(ownerKey)
@@ -130,7 +150,7 @@ local function getCargoInventoryForOwner(ownerKey)
 
     for cargoType, cargoData in pairs(Config.CargoTypes) do
         local itemName = cargoData.item or cargoType
-        local amount = exports.ox_inventory:Search(stashId, 'count', itemName) or 0
+        local amount = getInventoryItemCount(stashId, itemName)
         inventory[cargoType] = amount
         totalCrates = totalCrates + amount
     end
@@ -148,6 +168,214 @@ local function removeCargoFromInventory(ownerKey, cargoType, amount)
     local itemName = getCargoItemName(cargoType)
     local stashId = ensureWarehouseStash(ownerKey)
     return exports.ox_inventory:RemoveItem(stashId, itemName, amount)
+end
+
+local function normalizePlate(plate)
+    if type(plate) ~= 'string' then
+        return ''
+    end
+
+    local trimmed = plate:gsub('^%s*(.-)%s*$', '%1')
+    return trimmed
+end
+
+local function getTrunkInventoryId(plate)
+    local normalized = normalizePlate(plate)
+    if normalized == '' then
+        return nil
+    end
+
+    return ('trunk%s'):format(normalized), normalized
+end
+
+local function ensureTrunkInventoryLoaded(plate)
+    local trunkId = getTrunkInventoryId(plate)
+    if not trunkId then
+        return nil
+    end
+
+    local inv = exports.ox_inventory:GetInventory(trunkId)
+    if not inv then
+        return nil
+    end
+
+    return trunkId
+end
+
+local function addCargoToTrunk(plate, cargoType, amount)
+    local itemName = getCargoItemName(cargoType)
+    local trunkId = ensureTrunkInventoryLoaded(plate)
+    if not trunkId then
+        return false, 'invalid_inventory'
+    end
+
+    return exports.ox_inventory:AddItem(trunkId, itemName, amount)
+end
+
+local function removeCargoFromTrunk(plate, cargoType, amount)
+    local itemName = getCargoItemName(cargoType)
+    local trunkId = ensureTrunkInventoryLoaded(plate)
+    if not trunkId then
+        return false, 'invalid_inventory'
+    end
+
+    return exports.ox_inventory:RemoveItem(trunkId, itemName, amount)
+end
+
+local function getCargoInTrunk(plate, cargoType)
+    local trunkId = ensureTrunkInventoryLoaded(plate)
+    if not trunkId then
+        return 0
+    end
+
+    return getInventoryItemCount(trunkId, getCargoItemName(cargoType))
+end
+
+local function waitForTrunkInventory(plate, timeoutMs, intervalMs)
+    local timeout = timeoutMs or 3000
+    local interval = intervalMs or 100
+    local elapsed = 0
+
+    while elapsed <= timeout do
+        local trunkId = ensureTrunkInventoryLoaded(plate)
+        if trunkId then
+            return trunkId
+        end
+
+        Wait(interval)
+        elapsed = elapsed + interval
+    end
+
+    return nil
+end
+
+local function buildNonEmptyCargoMap(inventory)
+    local cargoMap = {}
+    local totalCrates = 0
+
+    for cargoType, amount in pairs(inventory or {}) do
+        local count = tonumber(amount) or 0
+        if count > 0 then
+            cargoMap[cargoType] = count
+            totalCrates = totalCrates + count
+        end
+    end
+
+    return cargoMap, totalCrates
+end
+
+local function clearSellLoadForOwner(ownerKey)
+    local active = ActiveSellLoads[ownerKey]
+    if active and active.startedBy then
+        SellLoadBySource[active.startedBy] = nil
+    end
+    ActiveSellLoads[ownerKey] = nil
+end
+
+local function returnSellLoadToWarehouse(ownerKey)
+    local active = ActiveSellLoads[ownerKey]
+    if not active or not active.cargo then
+        return false
+    end
+
+    local vehiclePlate = active.vehiclePlate
+    local trunkAvailable = vehiclePlate and ensureTrunkInventoryLoaded(vehiclePlate) ~= nil
+    local hadFailure = false
+    for cargoType, amount in pairs(active.cargo) do
+        if trunkAvailable then
+            local availableInTrunk = getCargoInTrunk(vehiclePlate, cargoType)
+            local returnAmount = math.min(availableInTrunk, amount)
+            if returnAmount > 0 then
+                local removed = removeCargoFromTrunk(vehiclePlate, cargoType, returnAmount)
+                if removed then
+                    local restored = addCargoToInventory(ownerKey, cargoType, returnAmount)
+                    if not restored then
+                        hadFailure = true
+                    end
+                else
+                    if Config.Debug then
+                        print(('[LAGERHAUS][DEBUG] Rücklagerung fehlgeschlagen (%s x%s)'):format(cargoType, tostring(returnAmount)))
+                    end
+                    hadFailure = true
+                end
+            end
+        else
+            -- Das Fahrzeug ist nicht mehr erreichbar; Ware direkt ins Lager zurücklegen.
+            local restored = addCargoToInventory(ownerKey, cargoType, amount)
+            if not restored and Config.Debug then
+                print(('[LAGERHAUS][DEBUG] Fallback-Rücklagerung fehlgeschlagen (%s x%s)'):format(cargoType, tostring(amount)))
+            end
+            if not restored then
+                hadFailure = true
+            end
+        end
+    end
+
+    if hadFailure then
+        return false
+    end
+
+    clearSellLoadForOwner(ownerKey)
+    return true
+end
+
+local function reserveWarehouseCargoForSell(ownerKey, startedBy, vehiclePlate)
+    local trunkId, normalizedPlate = getTrunkInventoryId(vehiclePlate)
+    if not trunkId then
+        return false, 'Ungültiges Lieferfahrzeug (Kennzeichen).', nil, 0
+    end
+
+    local deliveryCfg = Config.Delivery or {}
+    local loadTimeout = deliveryCfg.trunkLoadTimeoutMs or 3000
+    if not waitForTrunkInventory(normalizedPlate, loadTimeout, 100) then
+        return false, 'Konnte den Kofferraum nicht laden.', nil, 0
+    end
+
+    local inventory = getCargoInventoryForOwner(ownerKey)
+    local cargoMap, totalCrates = buildNonEmptyCargoMap(inventory)
+    if totalCrates <= 0 then
+        return false, 'Keine Ware zu verkaufen!', nil, 0
+    end
+
+    local loadedCargo = {}
+    for cargoType, amount in pairs(cargoMap) do
+        local removed = removeCargoFromInventory(ownerKey, cargoType, amount)
+        if not removed then
+            for rollbackCargoType, rollbackAmount in pairs(loadedCargo) do
+                addCargoToInventory(ownerKey, rollbackCargoType, rollbackAmount)
+            end
+            return false, 'Konnte Ware nicht in das Lieferfahrzeug laden.', nil, 0
+        end
+
+        local added, addReason = addCargoToTrunk(normalizedPlate, cargoType, amount)
+        if not added then
+            addCargoToInventory(ownerKey, cargoType, amount)
+            for rollbackCargoType, rollbackAmount in pairs(loadedCargo) do
+                removeCargoFromTrunk(normalizedPlate, rollbackCargoType, rollbackAmount)
+                addCargoToInventory(ownerKey, rollbackCargoType, rollbackAmount)
+            end
+            if Config.Debug then
+                print(('[LAGERHAUS][DEBUG] Trunk AddItem fehlgeschlagen (%s): %s'):format(cargoType, tostring(addReason)))
+            end
+            return false, 'Kofferraum hat nicht genug Platz für die Ware.', nil, 0
+        end
+
+        loadedCargo[cargoType] = amount
+    end
+
+    ActiveSellLoads[ownerKey] = {
+        cargo = loadedCargo,
+        totalCrates = totalCrates,
+        startedBy = startedBy,
+        vehiclePlate = normalizedPlate,
+        startedAt = os.time()
+    }
+    SellLoadBySource[startedBy] = ownerKey
+    return true, nil, loadedCargo, totalCrates
+end
+
+local function clearSourceMissionForSource(src)
+    ActiveSourceMissions[src] = nil
 end
 
 local function getWarehousePriceScale(warehouseId)
@@ -213,45 +441,67 @@ local function sendLegacyPoliceAlert(coords, alertMessage)
     end
 end
 
-local function sendRoadPhoneDispatch(src, coords, alertMessage)
+local function sendRoadPhoneDispatch(coords, alertMessage)
     local dispatchCfg = Config.Dispatch or {}
     local roadPhoneCfg = dispatchCfg.roadphone or {}
     local resourceName = roadPhoneCfg.resource or 'roadphone'
-    local dispatchJob = roadPhoneCfg.jobName or (Config.Police and Config.Police.jobName) or 'police'
-    local mode = roadPhoneCfg.mode or 'auto'
-    local thirdArg = nil
-
-    if roadPhoneCfg.useCoordsAsThirdArg and coords then
-        thirdArg = { x = coords.x, y = coords.y, z = coords.z }
-    end
 
     if GetResourceState(resourceName) ~= 'started' then
+        if Config.Debug then
+            print(('[LAGERHAUS][DEBUG] RoadPhone resource nicht gestartet: %s'):format(resourceName))
+        end
         return false
     end
 
-    if mode ~= 'client' then
-        local serverOk = pcall(function()
-            exports[resourceName]:sendDispatch(alertMessage, dispatchJob, thirdArg)
-        end)
-        if serverOk then
-            return true
-        end
+    if Config.SendPoliceDispatch == false then
+        return true
     end
 
-    if mode ~= 'server' and src and src > 0 then
-        TriggerClientEvent('warehouse:client:roadphoneDispatch', src, alertMessage, dispatchJob, thirdArg, resourceName)
+    local dispatchJob = Config.SendPoliceJob or roadPhoneCfg.jobName or (Config.Police and Config.Police.jobName) or 'police'
+    local dispatchTitle = Config.SendPoliceTitle or (roadPhoneCfg.title or 'LagerhausAlarm')
+    local dispatchText = Config.SendPoliceText or alertMessage or 'Verdächtige Lagerhaus-Aktivität'
+    local dispatchCoords = nil
+    local dispatchImage = roadPhoneCfg.image or nil
+
+    if coords then
+        dispatchCoords = { x = coords.x, y = coords.y, z = coords.z }
+    end
+
+    if dispatchTitle:find('%s') then
+        dispatchTitle = dispatchTitle:gsub('%s+', '-')
+    end
+
+    local anonOk, anonResult = pcall(function()
+        return exports[resourceName]:sendDispatchAnonym(dispatchJob, dispatchTitle, dispatchText, dispatchCoords, dispatchImage)
+    end)
+    if anonOk and anonResult ~= false then
         return true
+    end
+
+    if Config.Debug then
+        print(('[LAGERHAUS][DEBUG] RoadPhone sendDispatchAnonym fehlgeschlagen (ok=%s, result=%s)'):format(tostring(anonOk), tostring(anonResult)))
+    end
+
+    local fallbackOk, fallbackResult = pcall(function()
+        return exports[resourceName]:sendDispatch(dispatchText, dispatchJob, dispatchCoords)
+    end)
+    if fallbackOk and fallbackResult ~= false then
+        return true
+    end
+
+    if Config.Debug then
+        print(('[LAGERHAUS][DEBUG] RoadPhone Fallback sendDispatch fehlgeschlagen (ok=%s, result=%s)'):format(tostring(fallbackOk), tostring(fallbackResult)))
     end
 
     return false
 end
 
-local function dispatchPoliceAlert(src, coords, alertMessage)
+local function dispatchPoliceAlert(coords, alertMessage)
     local dispatchCfg = Config.Dispatch or {}
     local provider = dispatchCfg.provider or 'legacy'
 
     if provider == 'roadphone' then
-        local sent = sendRoadPhoneDispatch(src, coords, alertMessage)
+        local sent = sendRoadPhoneDispatch(coords, alertMessage)
         if sent then
             return
         end
@@ -267,20 +517,18 @@ end
 
 -- Datenbank initialisieren
 CreateThread(function()
+    if Config.Dispatch and Config.Dispatch.provider == 'roadphone' then
+        local roadRes = (Config.Dispatch.roadphone and Config.Dispatch.roadphone.resource) or 'roadphone'
+        if GetResourceState(roadRes) ~= 'started' then
+            print(('[LAGERHAUS] WARNUNG: Dispatch provider ist RoadPhone, aber Resource nicht gestartet: %s'):format(roadRes))
+        end
+    end
+
     MySQL.Async.execute([[
         CREATE TABLE IF NOT EXISTS player_warehouses (
             citizenid VARCHAR(50) PRIMARY KEY,
             warehouse_id INT,
             purchase_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ]], {})
-    
-    MySQL.Async.execute([[
-        CREATE TABLE IF NOT EXISTS warehouse_inventory (
-            citizenid VARCHAR(50),
-            cargo_type VARCHAR(50),
-            amount INT DEFAULT 0,
-            PRIMARY KEY (citizenid, cargo_type)
         )
     ]], {})
     
@@ -304,15 +552,6 @@ function LoadAllWarehouses()
                 id = row.warehouse_id,
                 purchaseDate = row.purchase_date
             }
-        end
-    end)
-    
-    MySQL.Async.fetchAll('SELECT * FROM warehouse_inventory', {}, function(result)
-        for _, row in ipairs(result) do
-            if not WarehouseInventory[row.citizenid] then
-                WarehouseInventory[row.citizenid] = {}
-            end
-            WarehouseInventory[row.citizenid][row.cargo_type] = row.amount
         end
     end)
     
@@ -397,7 +636,6 @@ AddEventHandler('warehouse:server:purchase', function(warehouseId)
         purchaseDate = os.date('%Y-%m-%d %H:%M:%S')
     }
     
-    WarehouseInventory[ownerKey] = WarehouseInventory[ownerKey] or {}
     WarehouseStats[ownerKey] = WarehouseStats[ownerKey] or { totalEarned = 0, totalMissions = 0, missionsCompleted = 0 }
     
     MySQL.Async.execute('INSERT INTO player_warehouses (citizenid, warehouse_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE warehouse_id = VALUES(warehouse_id)', { ownerKey, warehouseId })
@@ -439,63 +677,148 @@ AddEventHandler('warehouse:server:getInventory', function(warehouseId)
     TriggerClientEvent('warehouse:client:openMenu', src, inventory, stats)
 end)
 
--- Waren einlagern
-RegisterNetEvent('warehouse:server:storeCargo')
-AddEventHandler('warehouse:server:storeCargo', function(warehouseId, cargoType, amount)
+RegisterNetEvent('warehouse:server:startSourceMission')
+AddEventHandler('warehouse:server:startSourceMission', function(warehouseId, cargoType)
     local src = source
     local Player = ESX.GetPlayerFromId(src)
-    
-    if not Player then return end
-    
-    -- Prüfe Fraktionsmitgliedschaft
+    if not Player then
+        TriggerClientEvent('warehouse:client:sourceMissionAuth', src, false)
+        return
+    end
+
+    local function fail(message)
+        if message then
+            notifyPlayer(src, message, 'error')
+        end
+        TriggerClientEvent('warehouse:client:sourceMissionAuth', src, false)
+    end
+
+    if ActiveSourceMissions[src] then
+        fail('Du hast bereits eine aktive Beschaffungsmission.')
+        return
+    end
+
     if not IsIronUnionMember(Player) then
         notifyNotFaction(src)
+        TriggerClientEvent('warehouse:client:sourceMissionAuth', src, false)
         return
     end
 
     if not Config.CargoTypes[cargoType] then
-        notifyPlayer(src, 'Ungültiger Warentyp!', 'error')
+        fail('Ungültiger Warentyp!')
         return
     end
 
-    amount = tonumber(amount) or 0
-    if amount <= 0 then
-        notifyPlayer(src, 'Ungültige Warenmenge!', 'error')
-        return
-    end
-    
     local ownerKey = getWarehouseOwnerKey(Player)
     if not ownerKey then
         notifyNotFaction(src)
+        TriggerClientEvent('warehouse:client:sourceMissionAuth', src, false)
         return
     end
 
     if not hasValidWarehouse(ownerKey, warehouseId) then
-        notifyPlayer(src, 'Du besitzt dieses Lagerhaus nicht.', 'error')
+        fail('Du besitzt dieses Lagerhaus nicht.')
+        return
+    end
+
+    local sourceCfg = (Config.Mission and Config.Mission.source) or {}
+    local minCrates = tonumber(sourceCfg.minCrates) or 1
+    local maxCrates = tonumber(sourceCfg.maxCrates) or 3
+    if maxCrates < minCrates then
+        maxCrates = minCrates
+    end
+
+    local approvedAmount = math.random(minCrates, maxCrates)
+    ActiveSourceMissions[src] = {
+        ownerKey = ownerKey,
+        warehouseId = warehouseId,
+        cargoType = cargoType,
+        amount = approvedAmount,
+        startedAt = os.time()
+    }
+
+    TriggerClientEvent('warehouse:client:sourceMissionAuth', src, true, approvedAmount)
+end)
+
+-- Waren einlagern
+RegisterNetEvent('warehouse:server:storeCargo')
+AddEventHandler('warehouse:server:storeCargo', function(warehouseId, cargoType)
+    local src = source
+    local Player = ESX.GetPlayerFromId(src)
+    
+    if not Player then
+        TriggerClientEvent('warehouse:client:storeCargoResult', src, false)
+        return
+    end
+
+    local function fail(message)
+        if message then
+            notifyPlayer(src, message, 'error')
+        end
+        TriggerClientEvent('warehouse:client:storeCargoResult', src, false)
+    end
+    
+    -- Prüfe Fraktionsmitgliedschaft
+    if not IsIronUnionMember(Player) then
+        notifyNotFaction(src)
+        TriggerClientEvent('warehouse:client:storeCargoResult', src, false)
+        return
+    end
+
+    if not Config.CargoTypes[cargoType] then
+        fail('Ungültiger Warentyp!')
+        return
+    end
+
+    local ownerKey = getWarehouseOwnerKey(Player)
+    if not ownerKey then
+        notifyNotFaction(src)
+        TriggerClientEvent('warehouse:client:storeCargoResult', src, false)
+        return
+    end
+
+    if not hasValidWarehouse(ownerKey, warehouseId) then
+        fail('Du besitzt dieses Lagerhaus nicht.')
+        return
+    end
+
+    local sourceMission = ActiveSourceMissions[src]
+    if not sourceMission then
+        fail('Keine aktive Beschaffungsmission gefunden.')
+        return
+    end
+
+    if sourceMission.ownerKey ~= ownerKey
+        or sourceMission.warehouseId ~= warehouseId
+        or sourceMission.cargoType ~= cargoType
+    then
+        fail('Ungültige Missionsdaten.')
+        return
+    end
+
+    local amount = tonumber(sourceMission.amount) or 0
+    if amount <= 0 then
+        fail('Ungültige Warenmenge!')
         return
     end
     
-    if not WarehouseInventory[ownerKey] then
-        WarehouseInventory[ownerKey] = {}
-    end
-
     local inventory, totalCrates = getCargoInventoryForOwner(ownerKey)
-    local currentAmount = inventory[cargoType] or 0
     
     local warehouse = Config.Warehouses[warehouseId]
     if totalCrates + amount > warehouse.capacity then
-        notifyPlayer(src, 'Lagerhaus ist voll!', 'error')
+        fail('Lagerhaus ist voll!')
         return
     end
 
-    local success = addCargoToInventory(ownerKey, cargoType, amount)
+    local success, reason = addCargoToInventory(ownerKey, cargoType, amount)
     if not success then
-        notifyPlayer(src, 'Nicht genug Platz im Inventar für diese Ware!', 'error')
+        if Config.Debug and reason then
+            print(('[LAGERHAUS][DEBUG] AddItem fehlgeschlagen (%s): %s'):format(cargoType, tostring(reason)))
+        end
+        fail('Konnte Ware nicht einlagern. Prüfe Item-Definition in ox_inventory.')
         return
     end
 
-    WarehouseInventory[ownerKey][cargoType] = currentAmount + amount
-    
     -- Statistik aktualisieren
     WarehouseStats[ownerKey] = WarehouseStats[ownerKey] or { totalEarned = 0, totalMissions = 0, missionsCompleted = 0 }
     WarehouseStats[ownerKey].missionsCompleted = (WarehouseStats[ownerKey].missionsCompleted or 0) + 1
@@ -503,7 +826,94 @@ AddEventHandler('warehouse:server:storeCargo', function(warehouseId, cargoType, 
     
     MySQL.Async.execute('UPDATE warehouse_stats SET missions_completed = missions_completed + 1, total_missions = total_missions + 1 WHERE citizenid = ?', {ownerKey})
     
+    clearSourceMissionForSource(src)
     notifyPlayer(src, amount .. ' Kisten ' .. Config.CargoTypes[cargoType].label .. ' eingelagert!', 'success')
+    TriggerClientEvent('warehouse:client:storeCargoResult', src, true, cargoType, amount)
+end)
+
+RegisterNetEvent('warehouse:server:startSellLoad')
+AddEventHandler('warehouse:server:startSellLoad', function(warehouseId, vehiclePlate)
+    local src = source
+    local Player = ESX.GetPlayerFromId(src)
+    if not Player then
+        TriggerClientEvent('warehouse:client:sellLoadResult', src, false)
+        return
+    end
+
+    local function fail(message)
+        if message then
+            notifyPlayer(src, message, 'error')
+        end
+        TriggerClientEvent('warehouse:client:sellLoadResult', src, false)
+    end
+
+    if not IsIronUnionMember(Player) then
+        notifyNotFaction(src)
+        TriggerClientEvent('warehouse:client:sellLoadResult', src, false)
+        return
+    end
+
+    local ownerKey = getWarehouseOwnerKey(Player)
+    if not ownerKey then
+        notifyNotFaction(src)
+        TriggerClientEvent('warehouse:client:sellLoadResult', src, false)
+        return
+    end
+
+    if not hasValidWarehouse(ownerKey, warehouseId) then
+        fail('Du besitzt dieses Lagerhaus nicht.')
+        return
+    end
+
+    if ActiveSellLoads[ownerKey] then
+        fail('Für dieses Lagerhaus läuft bereits eine Verkaufsmission.')
+        return
+    end
+
+    local success, errorMessage, _, totalCrates = reserveWarehouseCargoForSell(ownerKey, src, vehiclePlate)
+    if not success then
+        fail(errorMessage)
+        return
+    end
+
+    notifyPlayer(src, ('%s Kisten in das Lieferfahrzeug geladen.'):format(totalCrates), 'success')
+    TriggerClientEvent('warehouse:client:sellLoadResult', src, true, totalCrates)
+end)
+
+RegisterNetEvent('warehouse:server:cancelSellLoad')
+AddEventHandler('warehouse:server:cancelSellLoad', function()
+    local src = source
+    local Player = ESX.GetPlayerFromId(src)
+    if not Player then
+        return
+    end
+
+    local ownerKey = getWarehouseOwnerKey(Player)
+    if not ownerKey then
+        return
+    end
+
+    local active = ActiveSellLoads[ownerKey]
+    if not active then
+        return
+    end
+
+    if active.startedBy ~= src then
+        return
+    end
+
+    returnSellLoadToWarehouse(ownerKey)
+    notifyPlayer(src, 'Verkaufsmission abgebrochen. Ware wurde ins Lagerhaus zurückgelegt.', 'inform')
+end)
+
+RegisterNetEvent('warehouse:server:cancelSourceMission')
+AddEventHandler('warehouse:server:cancelSourceMission', function()
+    local src = source
+    if not ActiveSourceMissions[src] then
+        return
+    end
+
+    clearSourceMissionForSource(src)
 end)
 
 -- Verkauf abschließen
@@ -512,60 +922,101 @@ AddEventHandler('warehouse:server:completeSell', function(warehouseId)
     local src = source
     local Player = ESX.GetPlayerFromId(src)
     
-    if not Player then return end
+    if not Player then
+        TriggerClientEvent('warehouse:client:completeSellResult', src, false)
+        return
+    end
+
+    local function fail(message)
+        if message then
+            notifyPlayer(src, message, 'error')
+        end
+        TriggerClientEvent('warehouse:client:completeSellResult', src, false)
+    end
     
     -- Prüfe Fraktionsmitgliedschaft
     if not IsIronUnionMember(Player) then
         notifyNotFaction(src)
+        TriggerClientEvent('warehouse:client:completeSellResult', src, false)
         return
     end
 
     local deliveryCfg = Config.Delivery or {}
-    local requiredModel = GetHashKey(deliveryCfg.vehicleModel or Config.DeliveryVehicle or 'mule')
+    local requiredModel = GetHashKey(deliveryCfg.vehicleModel or 'mule')
     local requireDriver = deliveryCfg.requireDriver ~= false
     local ped = GetPlayerPed(src)
     local vehicle = GetVehiclePedIsIn(ped, false)
     if vehicle == 0 then
-        notifyPlayer(src, 'Du musst mit dem Lieferfahrzeug ausliefern.', 'error')
+        fail('Du musst mit dem Lieferfahrzeug ausliefern.')
         return
     end
 
     if GetEntityModel(vehicle) ~= requiredModel then
-        notifyPlayer(src, 'Falsches Lieferfahrzeug. Nutze das Missionsfahrzeug.', 'error')
+        fail('Falsches Lieferfahrzeug. Nutze das Missionsfahrzeug.')
         return
     end
     if requireDriver and GetPedInVehicleSeat(vehicle, -1) ~= ped then
-        notifyPlayer(src, 'Du musst Fahrer des Lieferfahrzeugs sein.', 'error')
+        fail('Du musst Fahrer des Lieferfahrzeugs sein.')
         return
     end
     
     local ownerKey = getWarehouseOwnerKey(Player)
     if not ownerKey then
         notifyNotFaction(src)
+        TriggerClientEvent('warehouse:client:completeSellResult', src, false)
         return
     end
 
     if not hasValidWarehouse(ownerKey, warehouseId) then
-        notifyPlayer(src, 'Du besitzt dieses Lagerhaus nicht.', 'error')
+        fail('Du besitzt dieses Lagerhaus nicht.')
         return
     end
 
-    local inventory = getCargoInventoryForOwner(ownerKey)
+    local activeLoad = ActiveSellLoads[ownerKey]
+    if not activeLoad or not activeLoad.cargo then
+        fail('Keine Ware im Lieferfahrzeug geladen.')
+        return
+    end
+
+    if activeLoad.startedBy ~= src then
+        fail('Diese Verkaufsmission gehört einem anderen Fraktionsmitglied.')
+        return
+    end
+
+    local currentPlate = normalizePlate(GetVehicleNumberPlateText(vehicle) or '')
+    if activeLoad.vehiclePlate and currentPlate ~= activeLoad.vehiclePlate then
+        fail('Das falsche Lieferfahrzeug wurde verwendet.')
+        return
+    end
+
+    local inventory = activeLoad.cargo
     local totalValue = 0
     local priceScale = getWarehousePriceScale(warehouseId)
     
     for cargoType, amount in pairs(inventory) do
         if amount > 0 then
-            local removed = removeCargoFromInventory(ownerKey, cargoType, amount)
-            if not removed then
-                notifyPlayer(src, 'Fehler beim Entfernen von ' .. cargoType .. ' aus dem Inventar.', 'error')
+            local availableInTrunk = getCargoInTrunk(activeLoad.vehiclePlate, cargoType)
+            local sellAmount = math.min(availableInTrunk, amount)
+            if sellAmount <= 0 then
                 goto continue
             end
 
+            local removed, removeReason = removeCargoFromTrunk(activeLoad.vehiclePlate, cargoType, sellAmount)
+            if not removed then
+                if Config.Debug then
+                    print(('[LAGERHAUS][DEBUG] removeCargoFromTrunk fehlgeschlagen (%s): %s'):format(cargoType, tostring(removeReason)))
+                end
+                fail('Fehler beim Entladen des Lieferfahrzeugs.')
+                return
+            end
+
             local cargoData = Config.CargoTypes[cargoType]
+            if not cargoData then
+                goto continue
+            end
             -- Wert basierend auf Menge (mehr Ware = höherer Preis pro Kiste)
-            local valuePerCrate = math.floor(cargoData.basePrice + ((cargoData.maxPrice - cargoData.basePrice) * (amount / priceScale)))
-            local cargoValue = valuePerCrate * amount
+            local valuePerCrate = math.floor(cargoData.basePrice + ((cargoData.maxPrice - cargoData.basePrice) * (sellAmount / priceScale)))
+            local cargoValue = valuePerCrate * sellAmount
             
             totalValue = totalValue + cargoValue
         end
@@ -573,7 +1024,7 @@ AddEventHandler('warehouse:server:completeSell', function(warehouseId)
     end
     
     if totalValue == 0 then
-        notifyPlayer(src, 'Keine Ware zu verkaufen!', 'error')
+        fail('Keine Ware zu verkaufen!')
         return
     end
     
@@ -583,22 +1034,18 @@ AddEventHandler('warehouse:server:completeSell', function(warehouseId)
     elseif Player.addAccountMoney then
         Player.addAccountMoney('money', totalValue, 'warehouse-sell')
     else
-        notifyPlayer(src, 'ESX Geld-Funktion fehlt (addMoney/addAccountMoney).', 'error')
+        fail('ESX Geld-Funktion fehlt (addMoney/addAccountMoney).')
         return
     end
     
-    -- In-Memory Cache nach Verkauf aktualisieren
-    WarehouseInventory[ownerKey] = {}
-    for cargoType in pairs(Config.CargoTypes) do
-        WarehouseInventory[ownerKey][cargoType] = 0
-    end
-    
+    clearSellLoadForOwner(ownerKey)
     -- Statistik aktualisieren
     WarehouseStats[ownerKey] = WarehouseStats[ownerKey] or { totalEarned = 0, totalMissions = 0, missionsCompleted = 0 }
     WarehouseStats[ownerKey].totalEarned = (WarehouseStats[ownerKey].totalEarned or 0) + totalValue
     MySQL.Async.execute('UPDATE warehouse_stats SET total_earned = total_earned + ? WHERE citizenid = ?', {totalValue, ownerKey})
     
     notifyPlayer(src, 'Verkauf abgeschlossen! Du erhältst $' .. formatNumber(totalValue), 'success')
+    TriggerClientEvent('warehouse:client:completeSellResult', src, true, totalValue)
     
     TriggerEvent('warehouse:server:log', src, 'Verkauf für $' .. totalValue)
 end)
@@ -610,9 +1057,8 @@ AddEventHandler('warehouse:server:alertPolice', function(coords, message)
         return
     end
 
-    local src = source
     local alertMessage = message or 'Verdächtige Lagerhaus-Aktivität'
-    dispatchPoliceAlert(src, coords, alertMessage)
+    dispatchPoliceAlert(coords, alertMessage)
 end)
 
 -- Risikolevel prüfen für Verkaufsmission
@@ -637,7 +1083,8 @@ AddEventHandler('warehouse:server:checkRiskLevel', function(warehouseId)
         return
     end
 
-    local inventory = getCargoInventoryForOwner(ownerKey)
+    local activeLoad = ActiveSellLoads[ownerKey]
+    local inventory = activeLoad and activeLoad.cargo or getCargoInventoryForOwner(ownerKey)
     local highRiskThreshold = ((Config.Mission and Config.Mission.source) and Config.Mission.source.highRiskWarningLevel) or 3
     
     local hasHighRisk = false
@@ -723,7 +1170,6 @@ RegisterCommand('givewarehouse', function(source, args)
         purchaseDate = os.date('%Y-%m-%d %H:%M:%S')
     }
 
-    WarehouseInventory[ownerKey] = WarehouseInventory[ownerKey] or {}
     WarehouseStats[ownerKey] = WarehouseStats[ownerKey] or { totalEarned = 0, totalMissions = 0, missionsCompleted = 0 }
     
     MySQL.Async.execute('INSERT INTO player_warehouses (citizenid, warehouse_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE warehouse_id = ?', { ownerKey, warehouseId, warehouseId })
@@ -760,19 +1206,18 @@ RegisterCommand('resetwarehouse', function(source, args)
     end
     
     Warehouses[ownerKey] = nil
-    WarehouseInventory[ownerKey] = nil
     WarehouseStats[ownerKey] = nil
+    clearSellLoadForOwner(ownerKey)
     clearWarehouseStash(ownerKey)
     
     MySQL.Async.execute('DELETE FROM player_warehouses WHERE citizenid = ?', {ownerKey})
-    MySQL.Async.execute('DELETE FROM warehouse_inventory WHERE citizenid = ?', {ownerKey})
     MySQL.Async.execute('DELETE FROM warehouse_stats WHERE citizenid = ?', {ownerKey})
     
     broadcastFactionWarehouse(nil)
     notifySource(source, 'Lagerhaus zurückgesetzt!', 'success')
 end, false)
 
-RegisterCommand('warehouseinfo', function(source, args)
+RegisterCommand('warehouseinfo', function(source)
     if source == 0 then
         print('[LAGERHAUS] Dieser Befehl ist nur ingame nutzbar.')
         return
@@ -872,11 +1317,33 @@ RegisterCommand('addcargo', function(source, args)
         return
     end
 
-    WarehouseInventory[ownerKey] = WarehouseInventory[ownerKey] or {}
-    WarehouseInventory[ownerKey][cargoType] = (WarehouseInventory[ownerKey][cargoType] or 0) + amount
-
     notifySource(source, amount .. 'x ' .. cargoType .. ' hinzugefügt!', 'success')
 end, false)
+
+AddEventHandler('playerDropped', function()
+    local src = source
+    clearSourceMissionForSource(src)
+
+    local ownerKey = SellLoadBySource[src]
+    if not ownerKey then
+        return
+    end
+
+    local returned = returnSellLoadToWarehouse(ownerKey)
+    if returned and Config.Debug then
+        print(('[LAGERHAUS][DEBUG] Verkaufsfracht nach Disconnect zurück ins Lager gelegt (owner=%s, src=%s)'):format(tostring(ownerKey), tostring(src)))
+    end
+end)
+
+AddEventHandler('onResourceStop', function(resourceName)
+    if resourceName ~= GetCurrentResourceName() then
+        return
+    end
+
+    for ownerKey in pairs(ActiveSellLoads) do
+        returnSellLoadToWarehouse(ownerKey)
+    end
+end)
 
 -- Logging
 RegisterNetEvent('warehouse:server:log')

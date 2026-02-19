@@ -2,15 +2,17 @@
 local ESX = exports['es_extended']:getSharedObject()
 
 WarehouseSmuggling = {
-    isInWarehouse = false,
     currentWarehouse = nil,
     isSourcing = false,
     isSelling = false,
     sourceMissionData = nil,
-    sellMissionData = nil,
+    pendingSourceMission = nil,
+    pendingSourceAuth = false,
     cargoVehicle = nil,
     sellDeliveryVehicle = nil,
-    currentCrates = 0,
+    pendingSellLoad = nil,
+    pendingSellComplete = false,
+    pendingStore = false,
     isIronUnion = false
 }
 
@@ -180,6 +182,12 @@ AddEventHandler('esx:setJob', function()
     TriggerServerEvent('warehouse:server:syncWarehouseState')
 end)
 
+RegisterNetEvent('esx:setGang')
+AddEventHandler('esx:setGang', function()
+    WarehouseSmuggling.isIronUnion = IsIronUnionMember()
+    TriggerServerEvent('warehouse:server:syncWarehouseState')
+end)
+
 function OpenWarehousePurchase(warehouseId)
     local warehouse = Config.Warehouses[warehouseId]
     
@@ -309,50 +317,67 @@ function OpenSourceMissionMenu()
 end
 
 function StartSourceMission(cargoType)
-    if WarehouseSmuggling.isSourcing then
+    if WarehouseSmuggling.isSourcing or WarehouseSmuggling.pendingSourceAuth then
         Notify('Du hast bereits eine aktive Mission!', 'error')
         return
     end
-    
-    -- Ausschließlich Land-Transport
-    local missionType = "land"
-    local location = Config.SourceLocations[math.random(1, #Config.SourceLocations)]
-    local vehicleModel = Config.SourceVehicles[missionType][math.random(1, #Config.SourceVehicles[missionType])]
+
+    if not WarehouseSmuggling.currentWarehouse then
+        Notify('Du besitzt kein Lagerhaus.', 'error')
+        return
+    end
+
     local cargoData = Config.CargoTypes[cargoType]
-    local sourceCfg = (Config.Mission and Config.Mission.source) or {}
-    
-    WarehouseSmuggling.sourceMissionData = {
+    if not cargoData then
+        Notify('Ungültiger Warentyp.', 'error')
+        return
+    end
+
+    local sourceVehicles = Config.SourceVehicles and Config.SourceVehicles.land
+    if not sourceVehicles or #sourceVehicles == 0 then
+        Notify('Keine Quellfahrzeuge in der Config definiert.', 'error')
+        return
+    end
+
+    WarehouseSmuggling.pendingSourceMission = {
         cargoType = cargoType,
-        missionType = missionType,
-        location = location,
-        vehicleModel = vehicleModel,
-        cratesCollected = 0,
-        totalCrates = math.random(sourceCfg.minCrates or 1, sourceCfg.maxCrates or 3),
+        location = Config.SourceLocations[math.random(1, #Config.SourceLocations)],
+        vehicleModel = sourceVehicles[math.random(1, #sourceVehicles)],
         riskLevel = cargoData.riskLevel,
         policeChance = cargoData.policeChance
     }
-    
-    -- Bei hohem Risiko Warnung anzeigen
-    if cargoData.riskLevel >= (sourceCfg.highRiskWarningLevel or 3) then
+    WarehouseSmuggling.pendingSourceAuth = true
+
+    Notify('Beschaffungsmission wird vorbereitet...', 'info')
+    TriggerServerEvent('warehouse:server:startSourceMission', WarehouseSmuggling.currentWarehouse, cargoType)
+end
+
+local function ActivateSourceMission(missionData)
+    local sourceCfg = (Config.Mission and Config.Mission.source) or {}
+    local cargoData = Config.CargoTypes[missionData.cargoType]
+
+    WarehouseSmuggling.sourceMissionData = missionData
+    WarehouseSmuggling.isSourcing = true
+
+    if cargoData and cargoData.riskLevel >= (sourceCfg.highRiskWarningLevel or 3) then
         Notify('WARNUNG: Hochriskante Ware! Polizei könnte alarmiert werden!', 'error', sourceCfg.highRiskWarningDuration or 5000)
     end
-    
-    WarehouseSmuggling.isSourcing = true
+
     RemoveZone(sourceTargetZone)
     sourceTargetZone = nil
     RemoveZone(returnTargetZone)
     returnTargetZone = nil
-    
-    -- Blip erstellen
+
+    local location = missionData.location
     local sourceBlip = Config.Blips and Config.Blips.source or {}
     WarehouseSmuggling.missionBlip = AddBlipForCoord(location.x, location.y, location.z)
     SetBlipSprite(WarehouseSmuggling.missionBlip, sourceBlip.sprite or 478)
     SetBlipColour(WarehouseSmuggling.missionBlip, sourceBlip.colour or 5)
     SetBlipRoute(WarehouseSmuggling.missionBlip, sourceBlip.route ~= false)
     SetBlipRouteColour(WarehouseSmuggling.missionBlip, sourceBlip.routeColour or (sourceBlip.colour or 5))
-    
+
     Notify('Beschaffungsmission gestartet! Hole die Ware und bringe sie zurück.', 'info')
-    
+
     sourceTargetZone = exports.ox_target:addSphereZone({
         coords = targetCoordsFromVec4(location),
         radius = (Config.Target and Config.Target.sourceCollectRadius) or 6.0,
@@ -376,8 +401,40 @@ function StartSourceMission(cargoType)
         }
     })
 
-    -- Mission Monitor
     CreateSourceMissionThread()
+end
+
+RegisterNetEvent('warehouse:client:sourceMissionAuth')
+AddEventHandler('warehouse:client:sourceMissionAuth', function(success, approvedCrates)
+    local pending = WarehouseSmuggling.pendingSourceMission
+    WarehouseSmuggling.pendingSourceAuth = false
+
+    if not pending then
+        return
+    end
+
+    if not success then
+        WarehouseSmuggling.pendingSourceMission = nil
+        return
+    end
+
+    local totalCrates = tonumber(approvedCrates) or 0
+    if totalCrates <= 0 then
+        WarehouseSmuggling.pendingSourceMission = nil
+        Notify('Ungültige Missionsdaten vom Server.', 'error')
+        return
+    end
+
+    WarehouseSmuggling.pendingSourceMission = nil
+    ActivateSourceMission({
+        cargoType = pending.cargoType,
+        location = pending.location,
+        vehicleModel = pending.vehicleModel,
+        cratesCollected = 0,
+        totalCrates = totalCrates,
+        riskLevel = pending.riskLevel,
+        policeChance = pending.policeChance
+    })
 end
 
 function targetCoordsFromVec4(coords)
@@ -491,6 +548,14 @@ end
 
 function StoreCargo()
     local mission = WarehouseSmuggling.sourceMissionData
+    if not mission then
+        return
+    end
+
+    if WarehouseSmuggling.pendingStore then
+        Notify('Einlagerung wird bereits verarbeitet...', 'info')
+        return
+    end
     
     if lib.progressBar({
         duration = (Config.Progress and Config.Progress.storeCargo) or 5000,
@@ -498,22 +563,27 @@ function StoreCargo()
         useWhileDead = false,
         canCancel = true
     }) then
-        -- Fahrzeug löschen
-        DeleteVehicleSafe(WarehouseSmuggling.cargoVehicle)
-        
-        RemoveBlip(WarehouseSmuggling.returnBlip)
-        RemoveZone(returnTargetZone)
-        returnTargetZone = nil
-        
+        WarehouseSmuggling.pendingStore = true
         TriggerServerEvent('warehouse:server:storeCargo', WarehouseSmuggling.currentWarehouse, mission.cargoType, mission.cratesCollected)
-        
-        WarehouseSmuggling.isSourcing = false
-        WarehouseSmuggling.sourceMissionData = nil
-        WarehouseSmuggling.cargoVehicle = nil
-        
-        Notify('Ware erfolgreich eingelagert!', 'success')
     end
 end
+
+RegisterNetEvent('warehouse:client:storeCargoResult')
+AddEventHandler('warehouse:client:storeCargoResult', function(success)
+    WarehouseSmuggling.pendingStore = false
+    if not success then
+        return
+    end
+
+    DeleteVehicleSafe(WarehouseSmuggling.cargoVehicle)
+    RemoveBlip(WarehouseSmuggling.returnBlip)
+    RemoveZone(returnTargetZone)
+    returnTargetZone = nil
+
+    WarehouseSmuggling.isSourcing = false
+    WarehouseSmuggling.sourceMissionData = nil
+    WarehouseSmuggling.cargoVehicle = nil
+end)
 
 function OpenSellMissionMenu()
     lib.registerContext({
@@ -543,7 +613,7 @@ function OpenSellMissionMenu()
 end
 
 function StartSellMission()
-    if WarehouseSmuggling.isSelling then
+    if WarehouseSmuggling.isSelling or WarehouseSmuggling.pendingSellLoad then
         Notify('Du hast bereits eine Verkaufsmission aktiv!', 'error')
         return
     end
@@ -556,7 +626,7 @@ function StartSellMission()
     end
     
     local deliveryCfg = Config.Delivery or {}
-    local deliveryModelName = deliveryCfg.vehicleModel or Config.DeliveryVehicle or 'mule'
+    local deliveryModelName = deliveryCfg.vehicleModel or 'mule'
     local deliveryModel = GetHashKey(deliveryModelName)
     if not IsModelInCdimage(deliveryModel) or not IsModelAVehicle(deliveryModel) then
         Notify('Ungültiges Lieferfahrzeug in der Config: ' .. deliveryModelName, 'error')
@@ -579,22 +649,37 @@ function StartSellMission()
     local plateMax = deliveryCfg.plateMax or 999
     SetVehicleNumberPlateText(WarehouseSmuggling.sellDeliveryVehicle, platePrefix .. tostring(math.random(plateMin, plateMax)))
     
-    WarehouseSmuggling.isSelling = true
-    WarehouseSmuggling.sellMissionData = {
+    WarehouseSmuggling.pendingSellLoad = {
         location = sellLocation,
-        vehicleModel = deliveryModelName
+        vehiclePlate = GetVehicleNumberPlateText(WarehouseSmuggling.sellDeliveryVehicle)
     }
+
+    Notify('Lade Ware in das Lieferfahrzeug...', 'info')
+    TriggerServerEvent('warehouse:server:startSellLoad', WarehouseSmuggling.currentWarehouse, WarehouseSmuggling.pendingSellLoad.vehiclePlate)
+end
+
+local function ActivateSellMission(loadedCrates)
+    local pending = WarehouseSmuggling.pendingSellLoad
+    if not pending then
+        return
+    end
+
+    WarehouseSmuggling.isSelling = true
+    WarehouseSmuggling.pendingSellLoad = nil
     RemoveZone(sellTargetZone)
     sellTargetZone = nil
-    
+
+    local sellLocation = pending.location
+    local deliveryCfg = Config.Delivery or {}
+
     -- Verkaufs-Blip
     local sellBlip = Config.Blips and Config.Blips.sell or {}
     WarehouseSmuggling.sellBlip = AddBlipForCoord(sellLocation.x, sellLocation.y, sellLocation.z)
     SetBlipSprite(WarehouseSmuggling.sellBlip, sellBlip.sprite or 500)
     SetBlipColour(WarehouseSmuggling.sellBlip, sellBlip.colour or 1)
     SetBlipRoute(WarehouseSmuggling.sellBlip, sellBlip.route ~= false)
-    
-    Notify('Verkaufsmission gestartet! Nutze das Lieferfahrzeug und fahre zum Käufer.', 'info')
+
+    Notify(('Verkaufsmission gestartet! %s Kisten wurden geladen.'):format(loadedCrates or 0), 'info')
 
     sellTargetZone = exports.ox_target:addSphereZone({
         coords = sellLocation,
@@ -606,7 +691,7 @@ function StartSellMission()
                 icon = (Config.TargetIcons and Config.TargetIcons.sellComplete) or 'fa-solid fa-handshake',
                 label = 'Waren verkaufen',
                 canInteract = function()
-                    if not WarehouseSmuggling.isSelling then
+                    if not WarehouseSmuggling.isSelling or WarehouseSmuggling.pendingSellComplete then
                         return false
                     end
 
@@ -629,10 +714,26 @@ function StartSellMission()
             }
         }
     })
-    
-    -- Verkaufs Monitor
+
     CreateSellMissionThread()
 end
+
+RegisterNetEvent('warehouse:client:sellLoadResult')
+AddEventHandler('warehouse:client:sellLoadResult', function(success, loadedCrates)
+    local pending = WarehouseSmuggling.pendingSellLoad
+    if not pending then
+        return
+    end
+
+    if not success then
+        WarehouseSmuggling.pendingSellLoad = nil
+        DeleteVehicleSafe(WarehouseSmuggling.sellDeliveryVehicle)
+        WarehouseSmuggling.sellDeliveryVehicle = nil
+        return
+    end
+
+    ActivateSellMission(loadedCrates)
+end)
 
 function CreateSellMissionThread()
     Citizen.CreateThread(function()
@@ -692,20 +793,27 @@ function CompleteSellMission()
         disable = { car = true, move = true, combat = true },
         anim = { dict = 'mp_common', clip = 'givetake1_a' }
     }) then
-        RemoveBlip(WarehouseSmuggling.sellBlip)
-        RemoveZone(sellTargetZone)
-        sellTargetZone = nil
-        
+        WarehouseSmuggling.pendingSellComplete = true
         TriggerServerEvent('warehouse:server:completeSell', WarehouseSmuggling.currentWarehouse)
-        
-        WarehouseSmuggling.isSelling = false
-        WarehouseSmuggling.sellMissionData = nil
-        DeleteVehicleSafe(WarehouseSmuggling.sellDeliveryVehicle)
-        WarehouseSmuggling.sellDeliveryVehicle = nil
-        
-        Notify('Verkauf abgeschlossen!', 'success')
+        Notify('Verkaufsabschluss wird verarbeitet...', 'info')
     end
 end
+
+RegisterNetEvent('warehouse:client:completeSellResult')
+AddEventHandler('warehouse:client:completeSellResult', function(success)
+    WarehouseSmuggling.pendingSellComplete = false
+    if not success then
+        return
+    end
+
+    RemoveBlip(WarehouseSmuggling.sellBlip)
+    RemoveZone(sellTargetZone)
+    sellTargetZone = nil
+    WarehouseSmuggling.isSelling = false
+    WarehouseSmuggling.pendingSellLoad = nil
+    DeleteVehicleSafe(WarehouseSmuggling.sellDeliveryVehicle)
+    WarehouseSmuggling.sellDeliveryVehicle = nil
+end)
 
 RegisterNetEvent('warehouse:client:hasWarehouse')
 AddEventHandler('warehouse:client:hasWarehouse', function(warehouseId)
@@ -720,18 +828,6 @@ end)
 RegisterNetEvent('warehouse:client:notify')
 AddEventHandler('warehouse:client:notify', function(message, notifType, duration)
     Notify(message, notifType, duration)
-end)
-
-RegisterNetEvent('warehouse:client:roadphoneDispatch')
-AddEventHandler('warehouse:client:roadphoneDispatch', function(message, jobName, thirdArg, resourceName)
-    local roadphoneResource = resourceName or ((Config.Dispatch and Config.Dispatch.roadphone and Config.Dispatch.roadphone.resource) or 'roadphone')
-    if GetResourceState(roadphoneResource) ~= 'started' then
-        return
-    end
-
-    pcall(function()
-        exports[roadphoneResource]:sendDispatch(message, jobName or 'police', thirdArg)
-    end)
 end)
 
 RegisterNetEvent('warehouse:client:policeAlert')
@@ -778,6 +874,14 @@ AddEventHandler('onResourceStop', function(resourceName)
         return
     end
 
+    if WarehouseSmuggling.isSourcing or WarehouseSmuggling.pendingSourceAuth then
+        TriggerServerEvent('warehouse:server:cancelSourceMission')
+    end
+
+    if WarehouseSmuggling.isSelling or WarehouseSmuggling.pendingSellLoad then
+        TriggerServerEvent('warehouse:server:cancelSellLoad')
+    end
+
     for warehouseId, zoneId in pairs(warehouseTargetZones) do
         RemoveZone(zoneId)
         warehouseTargetZones[warehouseId] = nil
@@ -790,4 +894,8 @@ AddEventHandler('onResourceStop', function(resourceName)
     DeleteVehicleSafe(WarehouseSmuggling.sellDeliveryVehicle)
     WarehouseSmuggling.cargoVehicle = nil
     WarehouseSmuggling.sellDeliveryVehicle = nil
+    WarehouseSmuggling.pendingSourceMission = nil
+    WarehouseSmuggling.pendingSourceAuth = false
+    WarehouseSmuggling.pendingSellLoad = nil
+    WarehouseSmuggling.pendingSellComplete = false
 end)

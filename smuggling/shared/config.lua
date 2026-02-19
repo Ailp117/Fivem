@@ -6,7 +6,7 @@ Config.FactionCheck = {
     checkType = "job" -- "gang" oder "job"
 }
 
-Config.Debug = false
+Config.Debug = true
 
 Config.Notify = {
     defaultDuration = 5000
@@ -162,25 +162,26 @@ Config.Police = {
     notifyDuration = 10000
 }
 
+Config.SendPoliceDispatch = true
+Config.SendPoliceJob = 'police'
+Config.SendPoliceTitle = 'Lagerhaus-Alarm'
+Config.SendPoliceText = 'Es wird verdächtige Aktivität an einem Lagerhaus gemeldet!'
+
 Config.Dispatch = {
     provider = "roadphone", -- "roadphone" oder "legacy"
     fallbackToLegacy = true,
     roadphone = {
         resource = "roadphone",
-        mode = "auto", -- "auto", "server", "client"
-        jobName = "police",
-        useCoordsAsThirdArg = false
+        jobName = "police"
     }
 }
 
 Config.Delivery = {
     vehicleModel = "mule",
     requireDriver = true,
+    trunkLoadTimeoutMs = 3000,
     spawnOffset = vector3(4.0, 0.0, 0.0),
     platePrefix = "SMUG",
     plateMin = 100,
     plateMax = 999
 }
-
--- Backward compatibility
-Config.DeliveryVehicle = Config.Delivery.vehicleModel
