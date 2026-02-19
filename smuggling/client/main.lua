@@ -68,6 +68,21 @@ local function formatNumber(number)
     return formatted
 end
 
+local function getDispatchChanceMultiplier(dispatchType)
+    local throttleCfg = Config.DispatchThrottle or {}
+    local defaultCfg = throttleCfg.default or {}
+    local typeCfg = throttleCfg[dispatchType] or {}
+    local multiplier = tonumber(typeCfg.chanceMultiplier)
+        or tonumber(defaultCfg.chanceMultiplier)
+        or 1.0
+
+    if multiplier < 0.0 then
+        return 0.0
+    end
+
+    return multiplier
+end
+
 -- Check if player is Iron Union member
 function IsIronUnionMember()
     local Player = ESX.GetPlayerData()
@@ -529,8 +544,9 @@ AddEventHandler('warehouse:client:collectCargoResult', function(success, collect
     -- Bei hohem Risiko (Risikowert >= 3) Polizei benachrichtigen
     local sourceCfg = (Config.Mission and Config.Mission.source) or {}
     if mission.riskLevel >= (sourceCfg.highRiskWarningLevel or 3) then
-        if math.random() < mission.policeChance then
-            TriggerServerEvent('warehouse:server:alertPolice', GetEntityCoords(PlayerPedId()), 'Verdächtige Aktivität bei Ladung von ' .. Config.CargoTypes[mission.cargoType].label .. ' festgestellt!')
+        local chance = math.min(1.0, mission.policeChance * getDispatchChanceMultiplier('source'))
+        if math.random() < chance then
+            TriggerServerEvent('warehouse:server:alertPolice', GetEntityCoords(PlayerPedId()), 'Verdächtige Aktivität bei Ladung von ' .. Config.CargoTypes[mission.cargoType].label .. ' festgestellt!', 'source')
             Notify('POLIZEI WURDE ALARMIERT!', 'error', sourceCfg.policeAlertNotifyDuration or 8000)
         end
     end
@@ -778,15 +794,17 @@ function CreateSellMissionThread()
             
             -- Bei hohem Risiko kontinuierliche Polizei-Checks
             if WarehouseSmuggling.hasHighRiskCargo then
-                if math.random() < (WarehouseSmuggling.policeChance or sellCfg.highRiskDefaultChance or 0.001) then
-                    TriggerServerEvent('warehouse:server:alertPolice', playerCoords, 'Verdächtiger Frachttransport unterwegs!')
+                local highRiskChance = (WarehouseSmuggling.policeChance or sellCfg.highRiskDefaultChance or 0.001) * getDispatchChanceMultiplier('sell')
+                if math.random() < math.min(1.0, highRiskChance) then
+                    TriggerServerEvent('warehouse:server:alertPolice', playerCoords, 'Verdächtiger Frachttransport unterwegs!', 'sell')
                     Notify('POLIZEI VERFOLGT DICH!', 'error', sellCfg.policeChaseNotifyDuration or 5000)
                 end
             else
                 -- Normale Checks
                 if GetGameTimer() - missionStartTime > (sellCfg.lowRiskStartDelayMs or 30000) then
-                    if math.random() < (sellCfg.lowRiskPoliceChance or 0.0005) then
-                        TriggerServerEvent('warehouse:server:alertPolice', playerCoords, 'Verdächtige Lagerhaus-Aktivität')
+                    local lowRiskChance = (sellCfg.lowRiskPoliceChance or 0.0005) * getDispatchChanceMultiplier('sell')
+                    if math.random() < math.min(1.0, lowRiskChance) then
+                        TriggerServerEvent('warehouse:server:alertPolice', playerCoords, 'Verdächtige Lagerhaus-Aktivität', 'sell')
                     end
                 end
             end

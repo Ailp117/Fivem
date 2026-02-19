@@ -6,6 +6,7 @@ WarehouseStats = {}
 ActiveSellLoads = {}
 SellLoadBySource = {}
 ActiveSourceMissions = {}
+DispatchStateBySource = {}
 
 local function notifyPlayer(playerId, message, notifType, duration)
     TriggerClientEvent('warehouse:client:notify', playerId, message, notifType or 'inform', duration)
@@ -30,6 +31,69 @@ end
 
 local function notifyNotFaction(playerId)
     notifyPlayer(playerId, ('Du bist kein Mitglied von %s!'):format(getFactionDisplayName()), 'error')
+end
+
+local function distanceBetweenCoords(coordA, coordB)
+    if not coordA or not coordB then
+        return math.huge
+    end
+
+    local ax, ay, az = coordA.x or 0.0, coordA.y or 0.0, coordA.z or 0.0
+    local bx, by, bz = coordB.x or 0.0, coordB.y or 0.0, coordB.z or 0.0
+    local dx, dy, dz = ax - bx, ay - by, az - bz
+    return math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+end
+
+local function getDispatchThrottleRule(dispatchType)
+    local throttleCfg = Config.DispatchThrottle or {}
+    local defaultCfg = throttleCfg.default or {}
+    local typeCfg = throttleCfg[dispatchType] or {}
+
+    return {
+        cooldownMs = tonumber(typeCfg.cooldownMs) or tonumber(defaultCfg.cooldownMs) or 0,
+        minDistance = tonumber(typeCfg.minDistance) or tonumber(defaultCfg.minDistance) or 0.0
+    }
+end
+
+local function shouldAllowDispatch(src, coords, dispatchType)
+    local throttleCfg = Config.DispatchThrottle or {}
+    if throttleCfg.enabled == false then
+        return true
+    end
+
+    local rule = getDispatchThrottleRule(dispatchType)
+    if rule.cooldownMs <= 0 and rule.minDistance <= 0.0 then
+        return true
+    end
+
+    local now = GetGameTimer()
+    local dispatchKey = dispatchType or 'default'
+    local statesByType = DispatchStateBySource[src]
+    if not statesByType then
+        statesByType = {}
+        DispatchStateBySource[src] = statesByType
+    end
+
+    local last = statesByType[dispatchKey]
+    if not last then
+        statesByType[dispatchKey] = { time = now, coords = coords or nil }
+        return true
+    end
+
+    local elapsed = now - (last.time or 0)
+    if rule.cooldownMs > 0 and elapsed < rule.cooldownMs then
+        return false
+    end
+
+    if rule.minDistance > 0.0 and coords and last.coords then
+        local distance = distanceBetweenCoords(coords, last.coords)
+        if distance < rule.minDistance then
+            return false
+        end
+    end
+
+    statesByType[dispatchKey] = { time = now, coords = coords or nil }
+    return true
 end
 
 local function getFactionOwnerKey()
@@ -179,56 +243,108 @@ local function normalizePlate(plate)
     return trimmed
 end
 
-local function getTrunkInventoryId(plate)
+local function getTrunkInventoryIds(plate)
     local normalized = normalizePlate(plate)
     if normalized == '' then
         return nil
     end
 
-    return ('trunk%s'):format(normalized), normalized
-end
+    local compact = normalized:gsub('%s+', '')
+    local upper = compact:upper()
+    local ids = {}
+    local seen = {}
 
-local function ensureTrunkInventoryLoaded(plate)
-    local trunkId = getTrunkInventoryId(plate)
-    if not trunkId then
-        return nil
+    local function pushPlate(plateValue)
+        if not plateValue or plateValue == '' then
+            return
+        end
+
+        local inventoryId = ('trunk%s'):format(plateValue)
+        if not seen[inventoryId] then
+            seen[inventoryId] = true
+            ids[#ids + 1] = inventoryId
+        end
     end
 
-    local inv = exports.ox_inventory:GetInventory(trunkId)
-    if not inv then
-        return nil
-    end
+    pushPlate(normalized)
+    pushPlate(compact)
+    pushPlate(upper)
 
-    return trunkId
+    return ids, normalized
 end
 
-local function addCargoToTrunk(plate, cargoType, amount)
+local function addCargoToTrunk(plate, cargoType, amount, forcedTrunkId)
     local itemName = getCargoItemName(cargoType)
-    local trunkId = ensureTrunkInventoryLoaded(plate)
-    if not trunkId then
-        return false, 'invalid_inventory'
+    local lastReason = 'invalid_inventory'
+
+    if forcedTrunkId then
+        local added, reason = exports.ox_inventory:AddItem(forcedTrunkId, itemName, amount)
+        return added, reason, forcedTrunkId
     end
 
-    return exports.ox_inventory:AddItem(trunkId, itemName, amount)
+    local trunkIds = getTrunkInventoryIds(plate)
+    if not trunkIds then
+        return false, lastReason, nil
+    end
+
+    for _, trunkId in ipairs(trunkIds) do
+        local added, reason = exports.ox_inventory:AddItem(trunkId, itemName, amount)
+        if added then
+            return true, nil, trunkId
+        end
+
+        lastReason = reason or lastReason
+    end
+
+    return false, lastReason, nil
 end
 
-local function removeCargoFromTrunk(plate, cargoType, amount)
+local function removeCargoFromTrunk(plate, cargoType, amount, forcedTrunkId)
     local itemName = getCargoItemName(cargoType)
-    local trunkId = ensureTrunkInventoryLoaded(plate)
-    if not trunkId then
-        return false, 'invalid_inventory'
+    local lastReason = 'invalid_inventory'
+
+    if forcedTrunkId then
+        local removed, reason = exports.ox_inventory:RemoveItem(forcedTrunkId, itemName, amount)
+        return removed, reason, forcedTrunkId
     end
 
-    return exports.ox_inventory:RemoveItem(trunkId, itemName, amount)
+    local trunkIds = getTrunkInventoryIds(plate)
+    if not trunkIds then
+        return false, lastReason, nil
+    end
+
+    for _, trunkId in ipairs(trunkIds) do
+        local removed, reason = exports.ox_inventory:RemoveItem(trunkId, itemName, amount)
+        if removed then
+            return true, nil, trunkId
+        end
+
+        lastReason = reason or lastReason
+    end
+
+    return false, lastReason, nil
 end
 
-local function getCargoInTrunk(plate, cargoType)
-    local trunkId = ensureTrunkInventoryLoaded(plate)
-    if not trunkId then
-        return 0
+local function getCargoInTrunk(plate, cargoType, forcedTrunkId)
+    local itemName = getCargoItemName(cargoType)
+
+    if forcedTrunkId then
+        return getInventoryItemCount(forcedTrunkId, itemName), forcedTrunkId
     end
 
-    return getInventoryItemCount(trunkId, getCargoItemName(cargoType))
+    local trunkIds = getTrunkInventoryIds(plate)
+    if not trunkIds then
+        return 0, nil
+    end
+
+    for _, trunkId in ipairs(trunkIds) do
+        local amount = getInventoryItemCount(trunkId, itemName)
+        if amount > 0 then
+            return amount, trunkId
+        end
+    end
+
+    return 0, trunkIds[1]
 end
 
 local function getSourceMissionMetadata(sourceMission)
@@ -241,15 +357,21 @@ local function getSourceMissionMetadata(sourceMission)
     }
 end
 
-local function waitForTrunkInventory(plate, timeoutMs, intervalMs)
+local function tryLoadTrunkInventoryByIds(trunkIds, timeoutMs, intervalMs)
+    if not trunkIds then
+        return nil
+    end
+
     local timeout = timeoutMs or 3000
     local interval = intervalMs or 100
     local elapsed = 0
 
     while elapsed <= timeout do
-        local trunkId = ensureTrunkInventoryLoaded(plate)
-        if trunkId then
-            return trunkId
+        for _, trunkId in ipairs(trunkIds) do
+            local inv = exports.ox_inventory:GetInventory(trunkId)
+            if inv then
+                return trunkId
+            end
         end
 
         Wait(interval)
@@ -289,14 +411,25 @@ local function returnSellLoadToWarehouse(ownerKey)
     end
 
     local vehiclePlate = active.vehiclePlate
-    local trunkAvailable = vehiclePlate and ensureTrunkInventoryLoaded(vehiclePlate) ~= nil
+    local trunkInventoryId = active.trunkInventoryId
+    local trunkAvailable = false
+    if vehiclePlate and vehiclePlate ~= '' then
+        if trunkInventoryId then
+            trunkAvailable = true
+        else
+            local trunkIds = getTrunkInventoryIds(vehiclePlate)
+            trunkInventoryId = tryLoadTrunkInventoryByIds(trunkIds, 250, 50)
+            trunkAvailable = trunkInventoryId ~= nil
+        end
+    end
     local hadFailure = false
     for cargoType, amount in pairs(active.cargo) do
         if trunkAvailable then
-            local availableInTrunk = getCargoInTrunk(vehiclePlate, cargoType)
+            local availableInTrunk, detectedTrunkId = getCargoInTrunk(vehiclePlate, cargoType, trunkInventoryId)
+            trunkInventoryId = detectedTrunkId or trunkInventoryId
             local returnAmount = math.min(availableInTrunk, amount)
             if returnAmount > 0 then
-                local removed = removeCargoFromTrunk(vehiclePlate, cargoType, returnAmount)
+                local removed = removeCargoFromTrunk(vehiclePlate, cargoType, returnAmount, trunkInventoryId)
                 if removed then
                     local restored = addCargoToInventory(ownerKey, cargoType, returnAmount)
                     if not restored then
@@ -330,16 +463,14 @@ local function returnSellLoadToWarehouse(ownerKey)
 end
 
 local function reserveWarehouseCargoForSell(ownerKey, startedBy, vehiclePlate)
-    local trunkId, normalizedPlate = getTrunkInventoryId(vehiclePlate)
-    if not trunkId then
+    local trunkIds, normalizedPlate = getTrunkInventoryIds(vehiclePlate)
+    if not trunkIds then
         return false, 'Ungültiges Lieferfahrzeug (Kennzeichen).', nil, 0
     end
 
     local deliveryCfg = Config.Delivery or {}
     local loadTimeout = deliveryCfg.trunkLoadTimeoutMs or 3000
-    if not waitForTrunkInventory(normalizedPlate, loadTimeout, 100) then
-        return false, 'Konnte den Kofferraum nicht laden.', nil, 0
-    end
+    local preferredTrunkId = tryLoadTrunkInventoryByIds(trunkIds, loadTimeout, 100)
 
     local inventory = getCargoInventoryForOwner(ownerKey)
     local cargoMap, totalCrates = buildNonEmptyCargoMap(inventory)
@@ -348,6 +479,7 @@ local function reserveWarehouseCargoForSell(ownerKey, startedBy, vehiclePlate)
     end
 
     local loadedCargo = {}
+    local usedTrunkId = preferredTrunkId
     for cargoType, amount in pairs(cargoMap) do
         local removed = removeCargoFromInventory(ownerKey, cargoType, amount)
         if not removed then
@@ -357,19 +489,20 @@ local function reserveWarehouseCargoForSell(ownerKey, startedBy, vehiclePlate)
             return false, 'Konnte Ware nicht in das Lieferfahrzeug laden.', nil, 0
         end
 
-        local added, addReason = addCargoToTrunk(normalizedPlate, cargoType, amount)
+        local added, addReason, loadedTrunkId = addCargoToTrunk(normalizedPlate, cargoType, amount, usedTrunkId)
         if not added then
             addCargoToInventory(ownerKey, cargoType, amount)
             for rollbackCargoType, rollbackAmount in pairs(loadedCargo) do
-                removeCargoFromTrunk(normalizedPlate, rollbackCargoType, rollbackAmount)
+                removeCargoFromTrunk(normalizedPlate, rollbackCargoType, rollbackAmount, usedTrunkId)
                 addCargoToInventory(ownerKey, rollbackCargoType, rollbackAmount)
             end
             if Config.Debug then
                 print(('[LAGERHAUS][DEBUG] Trunk AddItem fehlgeschlagen (%s): %s'):format(cargoType, tostring(addReason)))
             end
-            return false, 'Kofferraum hat nicht genug Platz für die Ware.', nil, 0
+            return false, 'Kofferraum konnte nicht beladen werden (Kapazität/Trunk nicht verfügbar).', nil, 0
         end
 
+        usedTrunkId = loadedTrunkId or usedTrunkId
         loadedCargo[cargoType] = amount
     end
 
@@ -377,6 +510,7 @@ local function reserveWarehouseCargoForSell(ownerKey, startedBy, vehiclePlate)
         cargo = loadedCargo,
         totalCrates = totalCrates,
         startedBy = startedBy,
+        trunkInventoryId = usedTrunkId,
         vehiclePlate = normalizedPlate,
         startedAt = os.time()
     }
@@ -1094,18 +1228,20 @@ AddEventHandler('warehouse:server:completeSell', function(warehouseId)
     end
 
     local inventory = activeLoad.cargo
+    local trunkInventoryId = activeLoad.trunkInventoryId
     local totalValue = 0
     local priceScale = getWarehousePriceScale(warehouseId)
     
     for cargoType, amount in pairs(inventory) do
         if amount > 0 then
-            local availableInTrunk = getCargoInTrunk(activeLoad.vehiclePlate, cargoType)
+            local availableInTrunk, detectedTrunkId = getCargoInTrunk(activeLoad.vehiclePlate, cargoType, trunkInventoryId)
+            trunkInventoryId = detectedTrunkId or trunkInventoryId
             local sellAmount = math.min(availableInTrunk, amount)
             if sellAmount <= 0 then
                 goto continue
             end
 
-            local removed, removeReason = removeCargoFromTrunk(activeLoad.vehiclePlate, cargoType, sellAmount)
+            local removed, removeReason = removeCargoFromTrunk(activeLoad.vehiclePlate, cargoType, sellAmount, trunkInventoryId)
             if not removed then
                 if Config.Debug then
                     print(('[LAGERHAUS][DEBUG] removeCargoFromTrunk fehlgeschlagen (%s): %s'):format(cargoType, tostring(removeReason)))
@@ -1156,8 +1292,14 @@ end)
 
 -- Polizei-Alarm mit Risikowert
 RegisterNetEvent('warehouse:server:alertPolice')
-AddEventHandler('warehouse:server:alertPolice', function(coords, message)
+AddEventHandler('warehouse:server:alertPolice', function(coords, message, dispatchType)
     if Config.Police and Config.Police.enabled == false then
+        return
+    end
+
+    local src = source
+    local dispatchKind = dispatchType or 'default'
+    if not shouldAllowDispatch(src, coords, dispatchKind) then
         return
     end
 
@@ -1426,6 +1568,7 @@ end, false)
 
 AddEventHandler('playerDropped', function()
     local src = source
+    DispatchStateBySource[src] = nil
     clearSourceMissionForSource(src, true)
 
     local ownerKey = SellLoadBySource[src]

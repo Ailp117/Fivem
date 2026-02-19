@@ -176,6 +176,26 @@ Config.Dispatch = {
     }
 }
 
+-- Dispatch-Haeufigkeit und Abstand zwischen Dispatches
+Config.DispatchThrottle = {
+    enabled = true,
+    default = {
+        cooldownMs = 0,       -- 0 = kein globales Zeitlimit
+        minDistance = 0.0,    -- 0 = kein globaler Mindestabstand
+        chanceMultiplier = 1.0
+    },
+    source = {
+        cooldownMs = 30000,   -- mindestens 30s zwischen Source-Dispatches
+        minDistance = 60.0,   -- mindestens 60m Abstand
+        chanceMultiplier = 1.0
+    },
+    sell = {
+        cooldownMs = 45000,   -- mindestens 45s zwischen Sell-Dispatches
+        minDistance = 150.0,  -- mindestens 150m Abstand
+        chanceMultiplier = 1.0
+    }
+}
+
 Config.Delivery = {
     vehicleModel = "mule",
     requireDriver = true,
