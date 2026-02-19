@@ -1,5 +1,5 @@
 -- GTA Online Style Warehouse Smuggling System - Client
-local QBCore = exports['qb-core']:GetCoreObject()
+local ESX = exports['es_extended']:getSharedObject()
 
 WarehouseSmuggling = {
     isInWarehouse = false,
@@ -13,75 +13,36 @@ WarehouseSmuggling = {
     isIronUnion = false
 }
 
-Config.FactionCheck = {
-    enabled = true,
-    factionName = "the iron union",
-    checkType = "gang"
-}
+local function IsPlayerLoaded()
+    if ESX.IsPlayerLoaded then
+        return ESX.IsPlayerLoaded()
+    end
 
-Config = {
-    Warehouses = {
-        [1] = { name = "Rancho Warehouse", coords = vector3(826.7, -3199.5, 5.9), price = 250000, capacity = 42 },
-        [2] = { name = "La Mesa Warehouse", coords = vector3(919.4, -1517.0, 30.4), price = 400000, capacity = 42 },
-        [3] = { name = "Cypress Flats Warehouse", coords = vector3(804.4, -2224.5, 29.5), price = 350000, capacity = 42 },
-        [4] = { name = "LSIA Warehouse", coords = vector3(-1133.2, -3454.8, 13.9), price = 450000, capacity = 42 },
-        [5] = { name = "Elysian Island Warehouse", coords = vector3(251.3, -3078.6, 5.8), price = 375000, capacity = 42 },
-        [6] = { name = "Davis Quartz Warehouse", coords = vector3(2692.0, 3453.8, 55.7), price = 200000, capacity = 42 },
-        [7] = { name = "Paleto Bay Warehouse", coords = vector3(-108.3, 6167.2, 31.2), price = 175000, capacity = 42 },
-        [8] = { name = "Sandy Shores Warehouse", coords = vector3(1624.3, 3568.2, 35.2), price = 225000, capacity = 42 }
-    },
-    
-    CargoTypes = {
-        ["specialcargo"] = { label = "Spezialfracht", basePrice = 10000, maxPrice = 20000, riskLevel = 3, policeChance = 0.02 },
-        ["electronics"] = { label = "Elektronik", basePrice = 8000, maxPrice = 16000, riskLevel = 2, policeChance = 0.01 },
-        ["medical"] = { label = "Medizinische Ware", basePrice = 12000, maxPrice = 24000, riskLevel = 1, policeChance = 0.005 },
-        ["tobacco"] = { label = "Tabak & Alkohol", basePrice = 6000, maxPrice = 12000, riskLevel = 1, policeChance = 0.005 },
-        ["counterfeit"] = { label = "Fälschungen", basePrice = 7000, maxPrice = 14000, riskLevel = 3, policeChance = 0.02 },
-        ["gems"] = { label = "Edelsteine", basePrice = 15000, maxPrice = 30000, riskLevel = 2, policeChance = 0.01 },
-        ["weapons"] = { label = "Waffen & Munition", basePrice = 20000, maxPrice = 40000, riskLevel = 4, policeChance = 0.05 },
-        ["drugs"] = { label = "Drogen", basePrice = 18000, maxPrice = 35000, riskLevel = 4, policeChance = 0.05 }
-    },
-    
-    SourceLocations = {
-        -- Ausschließlich Land Missionen
-        vector4(294.5, -3260.8, 5.8, 0.0),
-        vector4(-320.5, -2695.2, 6.0, 0.0),
-        vector4(1234.6, -2959.8, 9.3, 0.0),
-        vector4(274.8, 301.7, 105.5, 0.0),
-        vector4(-1042.3, -2023.1, 13.2, 0.0),
-        vector4(1165.2, -1339.6, 34.9, 0.0),
-        vector4(-534.2, -1715.6, 19.3, 0.0),
-        vector4(896.1, -895.4, 26.1, 0.0),
-        vector4(-1048.4, -2673.8, 13.8, 0.0),
-        vector4(266.5, -1262.2, 29.3, 0.0),
-        vector4(-428.0, -1728.3, 19.8, 0.0),
-        vector4(1204.8, -3118.1, 5.5, 0.0),
-        vector4(-1161.5, -2166.9, 13.2, 0.0),
-        vector4(814.3, -2224.5, 29.5, 0.0),
-        vector4(152.4, -3211.5, 5.8, 0.0)
-    },
-    
-    SellLocations = {
-        vector3(-1392.3, 21.4, 53.5),
-        vector3(-631.9, -229.1, 38.1),
-        vector3(818.9, -2159.2, 29.6),
-        vector3(-1486.8, -909.0, 10.0),
-        vector3(365.6, 340.5, 104.4),
-        vector3(-596.4, -1601.2, 26.7)
-    },
-    
-    SourceVehicles = {
-        -- Ausschließlich Landfahrzeuge
-        land = { "benson", "pounder", "mule", "biff", "pounder2", "phantom", "hauler", "barracks", "riot" }
-    },
-    
-    EnemyModels = { "g_m_y_mexgoon_03", "g_m_m_chigoon_02", "g_m_y_salvagoon_03", "g_m_y_azteca_01" },
-    EnemyVehicles = { "buccaneer", "ruiner", "dominator", "gauntlet", "vigero", "gresley" }
-}
+    local playerData = ESX.GetPlayerData()
+    return playerData and playerData.identifier ~= nil
+end
+
+local function Notify(message, notifType, duration)
+    if lib and lib.notify then
+        local mappedType = notifType
+        if notifType == "info" then
+            mappedType = "inform"
+        end
+
+        lib.notify({
+            description = message,
+            type = mappedType or "inform",
+            duration = duration or 5000
+        })
+        return
+    end
+
+    ESX.ShowNotification(message)
+end
 
 -- Check if player is Iron Union member
 function IsIronUnionMember()
-    local Player = QBCore.Functions.GetPlayerData()
+    local Player = ESX.GetPlayerData()
     if not Player then return false end
     
     if Config.FactionCheck.checkType == "gang" then
@@ -96,7 +57,7 @@ end
 -- Warehouse Management Thread
 Citizen.CreateThread(function()
     -- Warte bis PlayerData geladen ist
-    while LocalPlayer.state.isLoggedIn ~= true do
+    while not IsPlayerLoaded() do
         Citizen.Wait(1000)
     end
     
@@ -176,7 +137,7 @@ end
 RegisterNetEvent('warehouse:client:purchaseSuccess')
 AddEventHandler('warehouse:client:purchaseSuccess', function(warehouseId)
     WarehouseSmuggling.currentWarehouse = warehouseId
-    QBCore.Functions.Notify('Lagerhaus erfolgreich gekauft!', 'success')
+    Notify('Lagerhaus erfolgreich gekauft!', 'success')
 end)
 
 function EnterWarehouse(warehouseId)
@@ -195,6 +156,10 @@ end
 
 function OpenWarehouseInterior(warehouseId)
     TriggerServerEvent('warehouse:server:getInventory', warehouseId)
+end
+
+function OpenWarehouseSaleMenu()
+    OpenWarehouseInterior(WarehouseSmuggling.currentWarehouse)
 end
 
 RegisterNetEvent('warehouse:client:openMenu')
@@ -317,7 +282,7 @@ end
 
 function StartSourceMission(cargoType)
     if WarehouseSmuggling.isSourcing then
-        QBCore.Functions.Notify('Du hast bereits eine aktive Mission!', 'error')
+        Notify('Du hast bereits eine aktive Mission!', 'error')
         return
     end
     
@@ -340,7 +305,7 @@ function StartSourceMission(cargoType)
     
     -- Bei hohem Risiko Warnung anzeigen
     if cargoData.riskLevel >= 3 then
-        QBCore.Functions.Notify('WARNUNG: Hochriskante Ware! Polizei könnte alarmiert werden!', 'error', 5000)
+        Notify('WARNUNG: Hochriskante Ware! Polizei könnte alarmiert werden!', 'error', 5000)
     end
     
     WarehouseSmuggling.isSourcing = true
@@ -352,7 +317,7 @@ function StartSourceMission(cargoType)
     SetBlipRoute(WarehouseSmuggling.missionBlip, true)
     SetBlipRouteColour(WarehouseSmuggling.missionBlip, 5)
     
-    QBCore.Functions.Notify('Beschaffungsmission gestartet! Hole die Ware und bringe sie zurück.', 'info')
+    Notify('Beschaffungsmission gestartet! Hole die Ware und bringe sie zurück.', 'info')
     
     -- Mission Monitor
     CreateSourceMissionThread()
@@ -454,11 +419,11 @@ function CollectCrate()
     }) then
         ClearPedTasks(playerPed)
         mission.cratesCollected = mission.cratesCollected + 1
-        QBCore.Functions.Notify('Ware geladen! (' .. mission.cratesCollected .. '/' .. mission.totalCrates .. ')', 'success')
+        Notify('Ware geladen! (' .. mission.cratesCollected .. '/' .. mission.totalCrates .. ')', 'success')
         
         -- Chance auf zusätzliche Gegner
         if math.random() < 0.4 then
-            QBCore.Functions.Notify('Verstärkung ist eingetroffen!', 'error')
+            Notify('Verstärkung ist eingetroffen!', 'error')
             SpawnEnemies(GetEntityCoords(PlayerPedId()))
         end
         
@@ -466,7 +431,7 @@ function CollectCrate()
         if mission.riskLevel >= 3 then
             if math.random() < mission.policeChance then
                 TriggerServerEvent('warehouse:server:alertPolice', GetEntityCoords(playerPed), 'Verdächtige Aktivität bei Ladung von ' .. Config.CargoTypes[mission.cargoType].label .. ' festgestellt!')
-                QBCore.Functions.Notify('POLIZEI WURDE ALARMIERT!', 'error', 8000)
+                Notify('POLIZEI WURDE ALARMIERT!', 'error', 8000)
             end
         end
         
@@ -480,7 +445,7 @@ end
 
 function CompleteSourceMission()
     RemoveBlip(WarehouseSmuggling.missionBlip)
-    QBCore.Functions.Notify('Alle Waren geladen! Bringe sie zum Lagerhaus!', 'success')
+    Notify('Alle Waren geladen! Bringe sie zum Lagerhaus!', 'success')
     
     -- Lagerhaus Blip erstellen
     local warehouse = Config.Warehouses[WarehouseSmuggling.currentWarehouse]
@@ -535,7 +500,7 @@ function StoreCargo()
         WarehouseSmuggling.sourceMissionData = nil
         WarehouseSmuggling.cargoVehicle = nil
         
-        QBCore.Functions.Notify('Ware erfolgreich eingelagert!', 'success')
+        Notify('Ware erfolgreich eingelagert!', 'success')
     end
 end
 
@@ -568,7 +533,7 @@ end
 
 function StartSellMission()
     if WarehouseSmuggling.isSelling then
-        QBCore.Functions.Notify('Du hast bereits eine Verkaufsmission aktiv!', 'error')
+        Notify('Du hast bereits eine Verkaufsmission aktiv!', 'error')
         return
     end
     
@@ -582,7 +547,7 @@ function StartSellMission()
     SetBlipColour(WarehouseSmuggling.sellBlip, 1)
     SetBlipRoute(WarehouseSmuggling.sellBlip, true)
     
-    QBCore.Functions.Notify('Verkaufsmission gestartet! Fahre zum Käufer.', 'info')
+    Notify('Verkaufsmission gestartet! Fahre zum Käufer.', 'info')
     
     -- Verkaufs Monitor
     CreateSellMissionThread()
@@ -606,7 +571,7 @@ function CreateSellMissionThread()
             if WarehouseSmuggling.hasHighRiskCargo then
                 if math.random() < (WarehouseSmuggling.policeChance or 0.001) then
                     TriggerServerEvent('warehouse:server:alertPolice', playerCoords, 'Verdächtiger Frachttransport unterwegs!')
-                    QBCore.Functions.Notify('POLIZEI VERFOLGT DICH!', 'error', 5000)
+                    Notify('POLIZEI VERFOLGT DICH!', 'error', 5000)
                 end
             else
                 -- Normale Checks
@@ -649,7 +614,7 @@ function CompleteSellMission(location)
         WarehouseSmuggling.isSelling = false
         WarehouseSmuggling.sellMissionData = nil
         
-        QBCore.Functions.Notify('Verkauf abgeschlossen!', 'success')
+        Notify('Verkauf abgeschlossen!', 'success')
     end
 end
 
@@ -684,6 +649,31 @@ AddEventHandler('warehouse:client:hasWarehouse', function(warehouseId)
     WarehouseSmuggling.currentWarehouse = warehouseId
 end)
 
+RegisterNetEvent('warehouse:client:notify')
+AddEventHandler('warehouse:client:notify', function(message, notifType, duration)
+    Notify(message, notifType, duration)
+end)
+
+RegisterNetEvent('warehouse:client:policeAlert')
+AddEventHandler('warehouse:client:policeAlert', function(coords, message)
+    local alertBlip = AddBlipForCoord(coords.x, coords.y, coords.z)
+    SetBlipSprite(alertBlip, 161)
+    SetBlipColour(alertBlip, 1)
+    SetBlipScale(alertBlip, 1.2)
+    SetBlipAsShortRange(alertBlip, false)
+    BeginTextCommandSetBlipName("STRING")
+    AddTextComponentString("Polizei Alarm")
+    EndTextCommandSetBlipName(alertBlip)
+
+    Notify(message or 'Verdächtige Lagerhaus-Aktivität', 'error', 10000)
+
+    SetTimeout(60000, function()
+        if DoesBlipExist(alertBlip) then
+            RemoveBlip(alertBlip)
+        end
+    end)
+end)
+
 -- Risiko-Info vom Server erhalten
 RegisterNetEvent('warehouse:client:riskLevelInfo')
 AddEventHandler('warehouse:client:riskLevelInfo', function(hasHighRisk, maxRiskLevel, policeChance)
@@ -698,6 +688,6 @@ AddEventHandler('warehouse:client:riskLevelInfo', function(hasHighRisk, maxRiskL
         elseif maxRiskLevel == 3 then
             riskText = "HOCH"
         end
-        QBCore.Functions.Notify('WARNUNG: ' .. riskText .. 'ES RISIKO! Polizei-Aufmerksamkeit erhöht!', 'error', 8000)
+        Notify('WARNUNG: ' .. riskText .. 'ES RISIKO! Polizei-Aufmerksamkeit erhöht!', 'error', 8000)
     end
 end)

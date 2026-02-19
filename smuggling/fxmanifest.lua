@@ -1,12 +1,13 @@
 fx_version 'cerulean'
 game 'gta5'
 
-description 'GTA Online Style Hangar Smuggling System für QBCore'
+description 'GTA Online Style Hangar Smuggling System für ESX'
 author 'DeinName'
 version '2.0.0'
 
 shared_scripts {
-    '@qb-core/shared/locale.lua',
+    '@es_extended/imports.lua',
+    'config.lua',
     '@ox_lib/init.lua'
 }
 
@@ -20,7 +21,7 @@ server_scripts {
 }
 
 dependencies {
-    'qb-core',
+    'es_extended',
     'ox_lib',
     'oxmysql'
 }

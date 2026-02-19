@@ -1,15 +1,44 @@
 -- GTA Online Style Warehouse Smuggling System - Server
-local QBCore = exports['qb-core']:GetCoreObject()
+local ESX = exports['es_extended']:getSharedObject()
 
 Warehouses = {}
 WarehouseInventory = {}
 WarehouseStats = {}
 
-Config.FactionCheck = {
-    enabled = true,
-    factionName = "the iron union",
-    checkType = "gang" -- "gang" oder "job"
-}
+local function notifyPlayer(playerId, message, notifType, duration)
+    TriggerClientEvent('warehouse:client:notify', playerId, message, notifType or 'inform', duration)
+end
+
+local function notifySource(source, message, notifType, duration)
+    if source == 0 then
+        print('[LAGERHAUS] ' .. message)
+        return
+    end
+
+    notifyPlayer(source, message, notifType, duration)
+end
+
+local function getPlayerIdentifier(xPlayer)
+    return xPlayer.identifier
+end
+
+local function isAdmin(source)
+    if source == 0 then
+        return true
+    end
+
+    local xPlayer = ESX.GetPlayerFromId(source)
+    if not xPlayer then
+        return false
+    end
+
+    if xPlayer.getGroup then
+        local group = xPlayer.getGroup()
+        return group == 'admin' or group == 'superadmin'
+    end
+
+    return IsPlayerAceAllowed(source, 'command')
+end
 
 -- Datenbank initialisieren
 CreateThread(function()
@@ -90,63 +119,79 @@ end
 RegisterNetEvent('warehouse:server:purchase')
 AddEventHandler('warehouse:server:purchase', function(warehouseId)
     local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
+    local Player = ESX.GetPlayerFromId(src)
     
     if not Player then return end
     
     -- Prüfe Fraktionsmitgliedschaft
-    if not IsIronUnionMember(Player.PlayerData) then
-        TriggerClientEvent('QBCore:Notify', src, 'Du bist kein Mitglied von The Iron Union!', 'error')
+    if not IsIronUnionMember(Player) then
+        notifyPlayer(src, 'Du bist kein Mitglied von The Iron Union!', 'error')
         return
     end
     
-    local citizenid = Player.PlayerData.citizenid
+    local citizenid = getPlayerIdentifier(Player)
     local warehouse = Config.Warehouses[warehouseId]
     
     if not warehouse then
-        TriggerClientEvent('QBCore:Notify', src, 'Ungültiges Lagerhaus!', 'error')
+        notifyPlayer(src, 'Ungültiges Lagerhaus!', 'error')
         return
     end
     
     if Warehouses[citizenid] then
-        TriggerClientEvent('QBCore:Notify', src, 'Du besitzt bereits ein Lagerhaus!', 'error')
+        notifyPlayer(src, 'Du besitzt bereits ein Lagerhaus!', 'error')
         return
     end
-    
-    if Player.Functions.RemoveMoney('bank', warehouse.price, 'warehouse-purchase') then
-        Warehouses[citizenid] = {
-            id = warehouseId,
-            purchaseDate = os.date('%Y-%m-%d %H:%M:%S')
-        }
-        
-        WarehouseInventory[citizenid] = {}
-        WarehouseStats[citizenid] = { totalEarned = 0, totalMissions = 0, missionsCompleted = 0 }
-        
-        MySQL.Async.execute('INSERT INTO player_warehouses (citizenid, warehouse_id) VALUES (?, ?)', {citizenid, warehouseId})
-        MySQL.Async.execute('INSERT INTO warehouse_stats (citizenid) VALUES (?)', {citizenid})
-        
-        TriggerClientEvent('warehouse:client:purchaseSuccess', src, warehouseId)
-        TriggerEvent('warehouse:server:log', src, 'Lagerhaus gekauft: ' .. warehouse.name .. ' für $' .. warehouse.price)
-    else
-        TriggerClientEvent('QBCore:Notify', src, 'Nicht genug Geld auf dem Bankkonto!', 'error')
+
+    local bankMoney = 0
+    if Player.getAccount then
+        local bankAccount = Player.getAccount('bank')
+        if bankAccount then
+            bankMoney = bankAccount.money or 0
+        end
     end
+
+    if bankMoney < warehouse.price then
+        notifyPlayer(src, 'Nicht genug Geld auf dem Bankkonto!', 'error')
+        return
+    end
+
+    if not Player.removeAccountMoney then
+        notifyPlayer(src, 'ESX Konto-Funktion fehlt (removeAccountMoney).', 'error')
+        return
+    end
+
+    Player.removeAccountMoney('bank', warehouse.price, 'warehouse-purchase')
+
+    Warehouses[citizenid] = {
+        id = warehouseId,
+        purchaseDate = os.date('%Y-%m-%d %H:%M:%S')
+    }
+    
+    WarehouseInventory[citizenid] = WarehouseInventory[citizenid] or {}
+    WarehouseStats[citizenid] = WarehouseStats[citizenid] or { totalEarned = 0, totalMissions = 0, missionsCompleted = 0 }
+    
+    MySQL.Async.execute('INSERT INTO player_warehouses (citizenid, warehouse_id) VALUES (?, ?)', { citizenid, warehouseId })
+    MySQL.Async.execute('INSERT IGNORE INTO warehouse_stats (citizenid) VALUES (?)', { citizenid })
+    
+    TriggerClientEvent('warehouse:client:purchaseSuccess', src, warehouseId)
+    TriggerEvent('warehouse:server:log', src, 'Lagerhaus gekauft: ' .. warehouse.name .. ' für $' .. warehouse.price)
 end)
 
 -- Lagerhaus-Inventar abrufen
 RegisterNetEvent('warehouse:server:getInventory')
 AddEventHandler('warehouse:server:getInventory', function(warehouseId)
     local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
+    local Player = ESX.GetPlayerFromId(src)
     
     if not Player then return end
     
     -- Prüfe Fraktionsmitgliedschaft
-    if not IsIronUnionMember(Player.PlayerData) then
-        TriggerClientEvent('QBCore:Notify', src, 'Du bist kein Mitglied von The Iron Union!', 'error')
+    if not IsIronUnionMember(Player) then
+        notifyPlayer(src, 'Du bist kein Mitglied von The Iron Union!', 'error')
         return
     end
     
-    local citizenid = Player.PlayerData.citizenid
+    local citizenid = getPlayerIdentifier(Player)
     local inventory = WarehouseInventory[citizenid] or {}
     local stats = WarehouseStats[citizenid] or { totalEarned = 0, totalMissions = 0, missionsCompleted = 0 }
     
@@ -157,17 +202,17 @@ end)
 RegisterNetEvent('warehouse:server:storeCargo')
 AddEventHandler('warehouse:server:storeCargo', function(warehouseId, cargoType, amount)
     local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
+    local Player = ESX.GetPlayerFromId(src)
     
     if not Player then return end
     
     -- Prüfe Fraktionsmitgliedschaft
-    if not IsIronUnionMember(Player.PlayerData) then
-        TriggerClientEvent('QBCore:Notify', src, 'Du bist kein Mitglied von The Iron Union!', 'error')
+    if not IsIronUnionMember(Player) then
+        notifyPlayer(src, 'Du bist kein Mitglied von The Iron Union!', 'error')
         return
     end
     
-    local citizenid = Player.PlayerData.citizenid
+    local citizenid = getPlayerIdentifier(Player)
     
     if not WarehouseInventory[citizenid] then
         WarehouseInventory[citizenid] = {}
@@ -182,7 +227,7 @@ AddEventHandler('warehouse:server:storeCargo', function(warehouseId, cargoType, 
     
     local warehouse = Config.Warehouses[warehouseId]
     if totalCrates + amount > warehouse.capacity then
-        TriggerClientEvent('QBCore:Notify', src, 'Lagerhaus ist voll!', 'error')
+        notifyPlayer(src, 'Lagerhaus ist voll!', 'error')
         return
     end
     
@@ -195,32 +240,33 @@ AddEventHandler('warehouse:server:storeCargo', function(warehouseId, cargoType, 
     ]], {citizenid, cargoType, WarehouseInventory[citizenid][cargoType]})
     
     -- Statistik aktualisieren
+    WarehouseStats[citizenid] = WarehouseStats[citizenid] or { totalEarned = 0, totalMissions = 0, missionsCompleted = 0 }
     WarehouseStats[citizenid].missionsCompleted = (WarehouseStats[citizenid].missionsCompleted or 0) + 1
     WarehouseStats[citizenid].totalMissions = (WarehouseStats[citizenid].totalMissions or 0) + 1
     
     MySQL.Async.execute('UPDATE warehouse_stats SET missions_completed = missions_completed + 1, total_missions = total_missions + 1 WHERE citizenid = ?', {citizenid})
     
-    TriggerClientEvent('QBCore:Notify', src, amount .. ' Kisten ' .. Config.CargoTypes[cargoType].label .. ' eingelagert!', 'success')
+    notifyPlayer(src, amount .. ' Kisten ' .. Config.CargoTypes[cargoType].label .. ' eingelagert!', 'success')
 end)
 
 -- Verkauf abschließen
 RegisterNetEvent('warehouse:server:completeSell')
 AddEventHandler('warehouse:server:completeSell', function(warehouseId)
     local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
+    local Player = ESX.GetPlayerFromId(src)
     
     if not Player then return end
     
     -- Prüfe Fraktionsmitgliedschaft
-    if not IsIronUnionMember(Player.PlayerData) then
-        TriggerClientEvent('QBCore:Notify', src, 'Du bist kein Mitglied von The Iron Union!', 'error')
+    if not IsIronUnionMember(Player) then
+        notifyPlayer(src, 'Du bist kein Mitglied von The Iron Union!', 'error')
         return
     end
     
-    local citizenid = Player.PlayerData.citizenid
+    local citizenid = getPlayerIdentifier(Player)
     
     if not WarehouseInventory[citizenid] then
-        TriggerClientEvent('QBCore:Notify', src, 'Fehler: Keine Ware im Lager!', 'error')
+        notifyPlayer(src, 'Fehler: Keine Ware im Lager!', 'error')
         return
     end
     
@@ -240,12 +286,19 @@ AddEventHandler('warehouse:server:completeSell', function(warehouseId)
     end
     
     if totalValue == 0 then
-        TriggerClientEvent('QBCore:Notify', src, 'Keine Ware zu verkaufen!', 'error')
+        notifyPlayer(src, 'Keine Ware zu verkaufen!', 'error')
         return
     end
     
     -- Bezahlung
-    Player.Functions.AddMoney('cash', totalValue, 'warehouse-sell')
+    if Player.addMoney then
+        Player.addMoney(totalValue, 'warehouse-sell')
+    elseif Player.addAccountMoney then
+        Player.addAccountMoney('money', totalValue, 'warehouse-sell')
+    else
+        notifyPlayer(src, 'ESX Geld-Funktion fehlt (addMoney/addAccountMoney).', 'error')
+        return
+    end
     
     -- Inventar leeren
     for cargoType, amount in pairs(soldCargo) do
@@ -258,10 +311,11 @@ AddEventHandler('warehouse:server:completeSell', function(warehouseId)
     end
     
     -- Statistik aktualisieren
+    WarehouseStats[citizenid] = WarehouseStats[citizenid] or { totalEarned = 0, totalMissions = 0, missionsCompleted = 0 }
     WarehouseStats[citizenid].totalEarned = (WarehouseStats[citizenid].totalEarned or 0) + totalValue
     MySQL.Async.execute('UPDATE warehouse_stats SET total_earned = total_earned + ? WHERE citizenid = ?', {totalValue, citizenid})
     
-    TriggerClientEvent('QBCore:Notify', src, 'Verkauf abgeschlossen! Du erhältst $' .. formatNumber(totalValue), 'success')
+    notifyPlayer(src, 'Verkauf abgeschlossen! Du erhältst $' .. formatNumber(totalValue), 'success')
     
     TriggerEvent('warehouse:server:log', src, 'Verkauf für $' .. totalValue)
 end)
@@ -272,11 +326,12 @@ AddEventHandler('warehouse:server:alertPolice', function(coords, message)
     local src = source
     local alertMessage = message or 'Verdächtige Lagerhaus-Aktivität'
     
-    for _, playerId in ipairs(QBCore.Functions.GetPlayers()) do
-        local Player = QBCore.Functions.GetPlayer(playerId)
-        if Player and Player.PlayerData.job.name == 'police' then
+    for _, playerId in ipairs(ESX.GetPlayers()) do
+        local policeId = tonumber(playerId)
+        local Player = ESX.GetPlayerFromId(policeId)
+        if Player and Player.job and Player.job.name == 'police' then
             TriggerClientEvent('warehouse:client:policeAlert', playerId, coords, alertMessage)
-            TriggerClientEvent('QBCore:Notify', playerId, '�� ALARM: ' .. alertMessage, 'error', 10000)
+            notifyPlayer(policeId, 'ALARM: ' .. alertMessage, 'error', 10000)
         end
     end
 end)
@@ -285,16 +340,16 @@ end)
 RegisterNetEvent('warehouse:server:checkRiskLevel')
 AddEventHandler('warehouse:server:checkRiskLevel', function(warehouseId)
     local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
+    local Player = ESX.GetPlayerFromId(src)
     
     if not Player then return end
     
     -- Prüfe Fraktionsmitgliedschaft
-    if not IsIronUnionMember(Player.PlayerData) then
+    if not IsIronUnionMember(Player) then
         return
     end
     
-    local citizenid = Player.PlayerData.citizenid
+    local citizenid = getPlayerIdentifier(Player)
     local inventory = WarehouseInventory[citizenid] or {}
     
     local hasHighRisk = false
@@ -321,14 +376,14 @@ AddEventHandler('warehouse:server:checkRiskLevel', function(warehouseId)
 end)
 
 -- Spieler laden
-RegisterNetEvent('QBCore:Server:PlayerLoaded')
-AddEventHandler('QBCore:Server:PlayerLoaded', function()
-    local src = source
-    local Player = QBCore.Functions.GetPlayer(src)
+RegisterNetEvent('esx:playerLoaded')
+AddEventHandler('esx:playerLoaded', function(playerId, xPlayer)
+    local src = playerId or source
+    local Player = xPlayer or ESX.GetPlayerFromId(src)
     
     if not Player then return end
     
-    local citizenid = Player.PlayerData.citizenid
+    local citizenid = getPlayerIdentifier(Player)
     
     Citizen.Wait(1000)
     
@@ -338,39 +393,70 @@ AddEventHandler('QBCore:Server:PlayerLoaded', function()
 end)
 
 -- Admin Befehle
-QBCore.Commands.Add('givewarehouse', 'Gebe einem Spieler ein Lagerhaus (Admin)', {{name = 'id', help = 'Spieler ID'}, {name = 'warehouseid', help = 'Lagerhaus ID'}}, true, function(source, args)
+RegisterCommand('givewarehouse', function(source, args)
+    if not isAdmin(source) then
+        notifySource(source, 'Keine Berechtigung für diesen Befehl.', 'error')
+        return
+    end
+
     local targetId = tonumber(args[1])
     local warehouseId = tonumber(args[2])
-    local targetPlayer = QBCore.Functions.GetPlayer(targetId)
+
+    if not targetId or not warehouseId then
+        notifySource(source, 'Nutzung: /givewarehouse [id] [warehouseid]', 'error')
+        return
+    end
+
+    if not Config.Warehouses[warehouseId] then
+        notifySource(source, 'Ungültige Warehouse ID.', 'error')
+        return
+    end
+
+    local targetPlayer = ESX.GetPlayerFromId(targetId)
     
     if not targetPlayer then
-        TriggerClientEvent('QBCore:Notify', source, 'Spieler nicht gefunden!', 'error')
+        notifySource(source, 'Spieler nicht gefunden!', 'error')
         return
     end
     
-    local citizenid = targetPlayer.PlayerData.citizenid
+    local citizenid = getPlayerIdentifier(targetPlayer)
     
     Warehouses[citizenid] = {
         id = warehouseId,
         purchaseDate = os.date('%Y-%m-%d %H:%M:%S')
     }
+
+    WarehouseInventory[citizenid] = WarehouseInventory[citizenid] or {}
+    WarehouseStats[citizenid] = WarehouseStats[citizenid] or { totalEarned = 0, totalMissions = 0, missionsCompleted = 0 }
     
-    MySQL.Async.execute('INSERT INTO player_warehouses (citizenid, warehouse_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE warehouse_id = ?', {citizenid, warehouseId, warehouseId})
+    MySQL.Async.execute('INSERT INTO player_warehouses (citizenid, warehouse_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE warehouse_id = ?', { citizenid, warehouseId, warehouseId })
+    MySQL.Async.execute('INSERT IGNORE INTO warehouse_stats (citizenid) VALUES (?)', { citizenid })
     
     TriggerClientEvent('warehouse:client:hasWarehouse', targetId, warehouseId)
-    TriggerClientEvent('QBCore:Notify', source, 'Lagerhaus gegeben!', 'success')
-end, 'admin')
+    notifySource(source, 'Lagerhaus gegeben!', 'success')
+end, false)
 
-QBCore.Commands.Add('resetwarehouse', 'Reset Spieler Lagerhaus (Admin)', {{name = 'id', help = 'Spieler ID'}}, true, function(source, args)
+RegisterCommand('resetwarehouse', function(source, args)
+    if not isAdmin(source) then
+        notifySource(source, 'Keine Berechtigung für diesen Befehl.', 'error')
+        return
+    end
+
     local targetId = tonumber(args[1])
-    local targetPlayer = QBCore.Functions.GetPlayer(targetId)
+
+    if not targetId then
+        notifySource(source, 'Nutzung: /resetwarehouse [id]', 'error')
+        return
+    end
+
+    local targetPlayer = ESX.GetPlayerFromId(targetId)
     
     if not targetPlayer then
-        TriggerClientEvent('QBCore:Notify', source, 'Spieler nicht gefunden!', 'error')
+        notifySource(source, 'Spieler nicht gefunden!', 'error')
         return
     end
     
-    local citizenid = targetPlayer.PlayerData.citizenid
+    local citizenid = getPlayerIdentifier(targetPlayer)
     
     Warehouses[citizenid] = nil
     WarehouseInventory[citizenid] = nil
@@ -380,15 +466,24 @@ QBCore.Commands.Add('resetwarehouse', 'Reset Spieler Lagerhaus (Admin)', {{name 
     MySQL.Async.execute('DELETE FROM warehouse_inventory WHERE citizenid = ?', {citizenid})
     MySQL.Async.execute('DELETE FROM warehouse_stats WHERE citizenid = ?', {citizenid})
     
-    TriggerClientEvent('QBCore:Notify', source, 'Lagerhaus zurückgesetzt!', 'success')
-end, 'admin')
+    notifySource(source, 'Lagerhaus zurückgesetzt!', 'success')
+end, false)
 
-QBCore.Commands.Add('warehouseinfo', 'Zeige Lagerhaus-Informationen', {}, false, function(source, args)
-    local Player = QBCore.Functions.GetPlayer(source)
-    local citizenid = Player.PlayerData.citizenid
+RegisterCommand('warehouseinfo', function(source, args)
+    if source == 0 then
+        print('[LAGERHAUS] Dieser Befehl ist nur ingame nutzbar.')
+        return
+    end
+
+    local Player = ESX.GetPlayerFromId(source)
+    if not Player then
+        return
+    end
+
+    local citizenid = getPlayerIdentifier(Player)
     
     if not Warehouses[citizenid] then
-        TriggerClientEvent('QBCore:Notify', source, 'Du besitzt kein Lagerhaus!', 'error')
+        notifySource(source, 'Du besitzt kein Lagerhaus!', 'error')
         return
     end
     
@@ -424,25 +519,36 @@ QBCore.Commands.Add('warehouseinfo', 'Zeige Lagerhaus-Informationen', {}, false,
         multiline = true,
         args = {'[LAGERHAUS]', 'Abgeschlossene Missionen: ' .. stats.missionsCompleted}
     })
-end)
+end, false)
 
-QBCore.Commands.Add('addcargo', 'Füge Ware zum Lagerhaus hinzu (Admin)', {{name = 'id', help = 'Spieler ID'}, {name = 'type', help = 'Warentyp'}, {name = 'amount', help = 'Menge'}}, true, function(source, args)
+RegisterCommand('addcargo', function(source, args)
+    if not isAdmin(source) then
+        notifySource(source, 'Keine Berechtigung für diesen Befehl.', 'error')
+        return
+    end
+
     local targetId = tonumber(args[1])
     local cargoType = args[2]
     local amount = tonumber(args[3])
-    local targetPlayer = QBCore.Functions.GetPlayer(targetId)
+
+    if not targetId or not cargoType or not amount then
+        notifySource(source, 'Nutzung: /addcargo [id] [type] [amount]', 'error')
+        return
+    end
+
+    local targetPlayer = ESX.GetPlayerFromId(targetId)
     
     if not targetPlayer then
-        TriggerClientEvent('QBCore:Notify', source, 'Spieler nicht gefunden!', 'error')
+        notifySource(source, 'Spieler nicht gefunden!', 'error')
         return
     end
     
     if not Config.CargoTypes[cargoType] then
-        TriggerClientEvent('QBCore:Notify', source, 'Ungültiger Warentyp!', 'error')
+        notifySource(source, 'Ungültiger Warentyp!', 'error')
         return
     end
     
-    local citizenid = targetPlayer.PlayerData.citizenid
+    local citizenid = getPlayerIdentifier(targetPlayer)
     
     if not WarehouseInventory[citizenid] then
         WarehouseInventory[citizenid] = {}
@@ -457,8 +563,8 @@ QBCore.Commands.Add('addcargo', 'Füge Ware zum Lagerhaus hinzu (Admin)', {{name
         ON DUPLICATE KEY UPDATE amount = VALUES(amount)
     ]], {citizenid, cargoType, WarehouseInventory[citizenid][cargoType]})
     
-    TriggerClientEvent('QBCore:Notify', source, amount .. 'x ' .. cargoType .. ' hinzugefügt!', 'success')
-end, 'admin')
+    notifySource(source, amount .. 'x ' .. cargoType .. ' hinzugefügt!', 'success')
+end, false)
 
 -- Logging
 RegisterNetEvent('warehouse:server:log')
