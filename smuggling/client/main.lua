@@ -8,6 +8,7 @@ WarehouseSmuggling = {
     sourceMissionData = nil,
     pendingSourceMission = nil,
     pendingSourceAuth = false,
+    pendingCollect = false,
     cargoVehicle = nil,
     sellDeliveryVehicle = nil,
     pendingSellLoad = nil,
@@ -478,6 +479,15 @@ end
 
 function CollectCrate()
     local mission = WarehouseSmuggling.sourceMissionData
+    if not mission then
+        return
+    end
+
+    if WarehouseSmuggling.pendingCollect then
+        Notify('Warte auf Bestätigung der letzten Kiste...', 'info')
+        return
+    end
+
     local playerPed = PlayerPedId()
     
     -- Animation
@@ -491,25 +501,44 @@ function CollectCrate()
         disable = { car = true, move = true, combat = true }
     }) then
         ClearPedTasks(playerPed)
-        mission.cratesCollected = mission.cratesCollected + 1
-        Notify('Ware geladen! (' .. mission.cratesCollected .. '/' .. mission.totalCrates .. ')', 'success')
-        
-        -- Bei hohem Risiko (Risikowert >= 3) Polizei benachrichtigen
-        local sourceCfg = (Config.Mission and Config.Mission.source) or {}
-        if mission.riskLevel >= (sourceCfg.highRiskWarningLevel or 3) then
-            if math.random() < mission.policeChance then
-                TriggerServerEvent('warehouse:server:alertPolice', GetEntityCoords(playerPed), 'Verdächtige Aktivität bei Ladung von ' .. Config.CargoTypes[mission.cargoType].label .. ' festgestellt!')
-                Notify('POLIZEI WURDE ALARMIERT!', 'error', sourceCfg.policeAlertNotifyDuration or 8000)
-            end
-        end
-        
-        if mission.cratesCollected >= mission.totalCrates then
-            CompleteSourceMission()
-        end
+        WarehouseSmuggling.pendingCollect = true
+        TriggerServerEvent('warehouse:server:collectSourceCargo', WarehouseSmuggling.currentWarehouse, mission.cargoType)
     else
         ClearPedTasks(playerPed)
     end
 end
+
+RegisterNetEvent('warehouse:client:collectCargoResult')
+AddEventHandler('warehouse:client:collectCargoResult', function(success, collected, total)
+    WarehouseSmuggling.pendingCollect = false
+
+    local mission = WarehouseSmuggling.sourceMissionData
+    if not mission then
+        return
+    end
+
+    if not success then
+        return
+    end
+
+    mission.cratesCollected = tonumber(collected) or mission.cratesCollected
+    mission.totalCrates = tonumber(total) or mission.totalCrates
+
+    Notify('Ware geladen! (' .. mission.cratesCollected .. '/' .. mission.totalCrates .. ')', 'success')
+    
+    -- Bei hohem Risiko (Risikowert >= 3) Polizei benachrichtigen
+    local sourceCfg = (Config.Mission and Config.Mission.source) or {}
+    if mission.riskLevel >= (sourceCfg.highRiskWarningLevel or 3) then
+        if math.random() < mission.policeChance then
+            TriggerServerEvent('warehouse:server:alertPolice', GetEntityCoords(PlayerPedId()), 'Verdächtige Aktivität bei Ladung von ' .. Config.CargoTypes[mission.cargoType].label .. ' festgestellt!')
+            Notify('POLIZEI WURDE ALARMIERT!', 'error', sourceCfg.policeAlertNotifyDuration or 8000)
+        end
+    end
+    
+    if mission.cratesCollected >= mission.totalCrates then
+        CompleteSourceMission()
+    end
+end)
 
 function CompleteSourceMission()
     RemoveBlip(WarehouseSmuggling.missionBlip)
@@ -896,6 +925,7 @@ AddEventHandler('onResourceStop', function(resourceName)
     WarehouseSmuggling.sellDeliveryVehicle = nil
     WarehouseSmuggling.pendingSourceMission = nil
     WarehouseSmuggling.pendingSourceAuth = false
+    WarehouseSmuggling.pendingCollect = false
     WarehouseSmuggling.pendingSellLoad = nil
     WarehouseSmuggling.pendingSellComplete = false
 end)

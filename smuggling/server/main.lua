@@ -231,6 +231,16 @@ local function getCargoInTrunk(plate, cargoType)
     return getInventoryItemCount(trunkId, getCargoItemName(cargoType))
 end
 
+local function getSourceMissionMetadata(sourceMission)
+    if not sourceMission or not sourceMission.token then
+        return nil
+    end
+
+    return {
+        smuggleMission = sourceMission.token
+    }
+end
+
 local function waitForTrunkInventory(plate, timeoutMs, intervalMs)
     local timeout = timeoutMs or 3000
     local interval = intervalMs or 100
@@ -374,7 +384,20 @@ local function reserveWarehouseCargoForSell(ownerKey, startedBy, vehiclePlate)
     return true, nil, loadedCargo, totalCrates
 end
 
-local function clearSourceMissionForSource(src)
+local function clearSourceMissionForSource(src, removeItems)
+    local sourceMission = ActiveSourceMissions[src]
+    if not sourceMission then
+        return
+    end
+
+    if removeItems and (sourceMission.collected or 0) > 0 then
+        local itemName = getCargoItemName(sourceMission.cargoType)
+        local metadata = getSourceMissionMetadata(sourceMission)
+        pcall(function()
+            exports.ox_inventory:RemoveItem(src, itemName, sourceMission.collected, metadata)
+        end)
+    end
+
     ActiveSourceMissions[src] = nil
 end
 
@@ -734,10 +757,76 @@ AddEventHandler('warehouse:server:startSourceMission', function(warehouseId, car
         warehouseId = warehouseId,
         cargoType = cargoType,
         amount = approvedAmount,
+        collected = 0,
+        token = ('smug:%s:%s:%s'):format(src, os.time(), math.random(1000, 9999)),
         startedAt = os.time()
     }
 
     TriggerClientEvent('warehouse:client:sourceMissionAuth', src, true, approvedAmount)
+end)
+
+RegisterNetEvent('warehouse:server:collectSourceCargo')
+AddEventHandler('warehouse:server:collectSourceCargo', function(warehouseId, cargoType)
+    local src = source
+    local Player = ESX.GetPlayerFromId(src)
+    if not Player then
+        TriggerClientEvent('warehouse:client:collectCargoResult', src, false)
+        return
+    end
+
+    local function fail(message)
+        if message then
+            notifyPlayer(src, message, 'error')
+        end
+        TriggerClientEvent('warehouse:client:collectCargoResult', src, false)
+    end
+
+    if not Config.CargoTypes[cargoType] then
+        fail('Ungültiger Warentyp!')
+        return
+    end
+
+    local ownerKey = getWarehouseOwnerKey(Player)
+    if not ownerKey then
+        notifyNotFaction(src)
+        TriggerClientEvent('warehouse:client:collectCargoResult', src, false)
+        return
+    end
+
+    local sourceMission = ActiveSourceMissions[src]
+    if not sourceMission then
+        fail('Keine aktive Beschaffungsmission gefunden.')
+        return
+    end
+
+    if sourceMission.ownerKey ~= ownerKey
+        or sourceMission.warehouseId ~= warehouseId
+        or sourceMission.cargoType ~= cargoType
+    then
+        fail('Ungültige Missionsdaten.')
+        return
+    end
+
+    local collected = tonumber(sourceMission.collected) or 0
+    local amount = tonumber(sourceMission.amount) or 0
+    if collected >= amount then
+        fail('Alle Kisten wurden bereits eingesammelt.')
+        return
+    end
+
+    local itemName = getCargoItemName(cargoType)
+    local metadata = getSourceMissionMetadata(sourceMission)
+    local added, addReason = exports.ox_inventory:AddItem(src, itemName, 1, metadata)
+    if not added then
+        if Config.Debug and addReason then
+            print(('[LAGERHAUS][DEBUG] Collect AddItem fehlgeschlagen (%s): %s'):format(cargoType, tostring(addReason)))
+        end
+        fail('Kein Platz im Inventar für die Ware.')
+        return
+    end
+
+    sourceMission.collected = collected + 1
+    TriggerClientEvent('warehouse:client:collectCargoResult', src, true, sourceMission.collected, sourceMission.amount)
 end)
 
 -- Waren einlagern
@@ -801,6 +890,12 @@ AddEventHandler('warehouse:server:storeCargo', function(warehouseId, cargoType)
         fail('Ungültige Warenmenge!')
         return
     end
+
+    local collected = tonumber(sourceMission.collected) or 0
+    if collected < amount then
+        fail(('Du musst zuerst alle Kisten einsammeln (%s/%s).'):format(collected, amount))
+        return
+    end
     
     local inventory, totalCrates = getCargoInventoryForOwner(ownerKey)
     
@@ -810,8 +905,17 @@ AddEventHandler('warehouse:server:storeCargo', function(warehouseId, cargoType)
         return
     end
 
+    local itemName = getCargoItemName(cargoType)
+    local sourceMetadata = getSourceMissionMetadata(sourceMission)
+    local removedFromPlayer = exports.ox_inventory:RemoveItem(src, itemName, amount, sourceMetadata)
+    if not removedFromPlayer then
+        fail('Dir fehlt die eingesammelte Ware im Inventar.')
+        return
+    end
+
     local success, reason = addCargoToInventory(ownerKey, cargoType, amount)
     if not success then
+        exports.ox_inventory:AddItem(src, itemName, amount, sourceMetadata)
         if Config.Debug and reason then
             print(('[LAGERHAUS][DEBUG] AddItem fehlgeschlagen (%s): %s'):format(cargoType, tostring(reason)))
         end
@@ -913,7 +1017,7 @@ AddEventHandler('warehouse:server:cancelSourceMission', function()
         return
     end
 
-    clearSourceMissionForSource(src)
+    clearSourceMissionForSource(src, true)
 end)
 
 -- Verkauf abschließen
@@ -1322,7 +1426,7 @@ end, false)
 
 AddEventHandler('playerDropped', function()
     local src = source
-    clearSourceMissionForSource(src)
+    clearSourceMissionForSource(src, true)
 
     local ownerKey = SellLoadBySource[src]
     if not ownerKey then
