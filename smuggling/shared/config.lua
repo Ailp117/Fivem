@@ -13,14 +13,14 @@ Config.Notify = {
 }
 
 Config.Warehouses = {
-    [1] = { name = "Rancho Warehouse", coords = vector3(826.7, -3199.5, 5.9), price = 250000, capacity = 42 },
-    [2] = { name = "La Mesa Warehouse", coords = vector3(919.4, -1517.0, 30.4), price = 400000, capacity = 42 },
-    [3] = { name = "Cypress Flats Warehouse", coords = vector3(804.4, -2224.5, 29.5), price = 350000, capacity = 42 },
-    [4] = { name = "LSIA Warehouse", coords = vector3(-1133.2, -3454.8, 13.9), price = 450000, capacity = 42 },
-    [5] = { name = "Elysian Island Warehouse", coords = vector3(251.3, -3078.6, 5.8), price = 375000, capacity = 42 },
-    [6] = { name = "Davis Quartz Warehouse", coords = vector3(2692.0, 3453.8, 55.7), price = 200000, capacity = 42 },
-    [7] = { name = "Paleto Bay Warehouse", coords = vector3(-108.3, 6167.2, 31.2), price = 175000, capacity = 42 },
-    [8] = { name = "Sandy Shores Warehouse", coords = vector3(1624.3, 3568.2, 35.2), price = 225000, capacity = 42 }
+    [1] = { name = "Rancho Warehouse", coords = vector3(826.694520, -3203.762696, 5.926026), price = 250000, capacity = 42 },
+    [2] = { name = "La Mesa Warehouse", coords = vector3(906.210998, -1513.635132, 30.375122), price = 400000, capacity = 42 },
+    [3] = { name = "Cypress Flats Warehouse", coords = vector3(804.672546, -2219.472412, 29.414672), price = 350000, capacity = 42 },
+    [4] = { name = "LSIA Warehouse", coords = vector3(-1131.257202, -3423.850586, 13.929688), price = 450000, capacity = 42 },
+    [5] = { name = "Elysian Island Warehouse", coords = vector3(251.195602, -3075.613282, 5.774414), price = 375000, capacity = 42 },
+    [6] = { name = "Davis Quartz Warehouse", coords = vector3(2703.534180, 3457.701172, 55.531860), price = 200000, capacity = 42 },
+    [7] = { name = "Paleto Bay Warehouse", coords = vector3(-161.920884, 6189.296875, 31.419800), price = 175000, capacity = 42 },
+    [8] = { name = "Sandy Shores Warehouse", coords = vector3(1730.729614, 3707.169190, 34.098876), price = 225000, capacity = 42 }
 }
 
 Config.CargoTypes = {
@@ -37,29 +37,29 @@ Config.CargoTypes = {
 Config.SourceLocations = {
     -- Ausschliesslich Land Missionen
     vector4(294.5, -3260.8, 5.8, 0.0),
-    vector4(-320.5, -2695.2, 6.0, 0.0),
+    vector4(-322.892304, -2694.290040, 6.145020, 0.0),
     vector4(1234.6, -2959.8, 9.3, 0.0),
-    vector4(274.8, 301.7, 105.5, 0.0),
+    vector4(287.301086, 310.391204, 105.525268, 0.0),
     vector4(-1042.3, -2023.1, 13.2, 0.0),
-    vector4(1165.2, -1339.6, 34.9, 0.0),
-    vector4(-534.2, -1715.6, 19.3, 0.0),
-    vector4(896.1, -895.4, 26.1, 0.0),
-    vector4(-1048.4, -2673.8, 13.8, 0.0),
-    vector4(266.5, -1262.2, 29.3, 0.0),
-    vector4(-428.0, -1728.3, 19.8, 0.0),
+    vector4(1158.817626, -1310.386840, 34.907714, 0.0),
+    vector4(-539.103272, -1720.153808, 19.389038, 0.0),
+    vector4(895.753846, -891.876954, 27.224122, 0.0),
+    vector4(-1084.641724, -2477.274658, 14.064454, 0.0),
+    vector4(294.791198, -1251.771484, 29.397828, 0.0),
+    vector4(-428.650544, -1728.487916, 19.776612, 0.0),
     vector4(1204.8, -3118.1, 5.5, 0.0),
-    vector4(-1161.5, -2166.9, 13.2, 0.0),
-    vector4(814.3, -2224.5, 29.5, 0.0),
+    vector4(-1152.171386, -2170.101074, 13.255738, 0.0),
+    vector4(844.404418, -2365.120850, 30.341430, 0.0),
     vector4(152.4, -3211.5, 5.8, 0.0)
 }
 
 Config.SellLocations = {
     vector3(-1392.3, 21.4, 53.5),
-    vector3(-631.9, -229.1, 38.1),
-    vector3(818.9, -2159.2, 29.6),
-    vector3(-1486.8, -909.0, 10.0),
-    vector3(365.6, 340.5, 104.4),
-    vector3(-596.4, -1601.2, 26.7)
+    vector3(-635.301086, -243.903290, 38.227050),
+    vector3(822.145080, -2145.705566, 28.706910),
+    vector3(-1484.808838, -901.635192, 10.020508),
+    vector3(367.648346, 339.942872, 103.250610),
+    vector3(-612.672546, -1600.800048, 26.735474)
 }
 
 Config.SourceVehicles = {
@@ -71,6 +71,14 @@ Config.Economy = {
     -- Nur Anzeige im Menü (wird aktuell nicht abgebucht)
     sourceMissionBaseCost = 2000,
     sourceMissionCostIncrease = 500
+}
+
+Config.WarehouseSale = {
+    enabled = true,
+    refundPercent = 0.5,      -- 0.5 = 50% Rueckerstattung vom Kaufpreis
+    payoutAccount = "bank",   -- "bank", "money" oder false fuer Bargeld-Fallback
+    requireEmpty = true,      -- Verkauf nur wenn keine Ware eingelagert ist
+    blockDuringMissions = true -- Verkauf blockieren, solange Fraktions-Missionen laufen
 }
 
 Config.Inventory = {
@@ -138,6 +146,12 @@ Config.Progress = {
 
 Config.Mission = {
     priceScaleCrates = 42,
+    timeout = {
+        enabled = true,
+        checkIntervalMs = 5000,
+        sourceMinutes = 10,
+        sellMinutes = 10
+    },
     source = {
         monitorTick = 500,
         spawnDistance = 100.0,
@@ -201,7 +215,7 @@ Config.Delivery = {
     requireDriver = true,
     trunkLoadTimeoutMs = 3000,
     spawnOffset = vector3(4.0, 0.0, 0.0),
-    platePrefix = "SMUG",
+    platePrefix = "S",
     plateMin = 100,
     plateMax = 999
 }

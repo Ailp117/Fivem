@@ -7,6 +7,7 @@ ActiveSellLoads = {}
 SellLoadBySource = {}
 ActiveSourceMissions = {}
 DispatchStateBySource = {}
+local clearSourceMissionForSource
 
 local function notifyPlayer(playerId, message, notifType, duration)
     TriggerClientEvent('warehouse:client:notify', playerId, message, notifType or 'inform', duration)
@@ -404,6 +405,53 @@ local function clearSellLoadForOwner(ownerKey)
     ActiveSellLoads[ownerKey] = nil
 end
 
+local function hasActiveSourceMissionForOwner(ownerKey)
+    for missionSource, sourceMission in pairs(ActiveSourceMissions) do
+        if sourceMission and sourceMission.ownerKey == ownerKey then
+            return true, missionSource
+        end
+    end
+
+    return false, nil
+end
+
+local function clearSourceMissionsForOwner(ownerKey, notifyMembers)
+    for missionSource, sourceMission in pairs(ActiveSourceMissions) do
+        if sourceMission and sourceMission.ownerKey == ownerKey then
+            clearSourceMissionForSource(missionSource, true)
+            if notifyMembers then
+                notifyPlayer(missionSource, 'Lagerhaus wurde verkauft. Deine Beschaffungsmission wurde beendet.', 'error')
+            end
+        end
+    end
+end
+
+local function payoutWarehouseSale(player, amount)
+    if amount <= 0 then
+        return true
+    end
+
+    local saleCfg = Config.WarehouseSale or {}
+    local payoutAccount = saleCfg.payoutAccount
+
+    if payoutAccount and payoutAccount ~= false and payoutAccount ~= '' and player.addAccountMoney then
+        player.addAccountMoney(payoutAccount, amount, 'warehouse-sale')
+        return true
+    end
+
+    if player.addMoney then
+        player.addMoney(amount, 'warehouse-sale')
+        return true
+    end
+
+    if player.addAccountMoney then
+        player.addAccountMoney('money', amount, 'warehouse-sale')
+        return true
+    end
+
+    return false
+end
+
 local function returnSellLoadToWarehouse(ownerKey)
     local active = ActiveSellLoads[ownerKey]
     if not active or not active.cargo then
@@ -518,7 +566,7 @@ local function reserveWarehouseCargoForSell(ownerKey, startedBy, vehiclePlate)
     return true, nil, loadedCargo, totalCrates
 end
 
-local function clearSourceMissionForSource(src, removeItems)
+clearSourceMissionForSource = function(src, removeItems)
     local sourceMission = ActiveSourceMissions[src]
     if not sourceMission then
         return
@@ -542,6 +590,77 @@ local function getWarehousePriceScale(warehouseId)
     end
 
     return (Config.Mission and Config.Mission.priceScaleCrates) or 42
+end
+
+local function getMissionTimeoutSeconds(timeoutCfg, key, defaultMinutes)
+    local minutes = tonumber(timeoutCfg and timeoutCfg[key]) or defaultMinutes
+    if minutes <= 0 then
+        return 0
+    end
+
+    return math.floor(minutes * 60)
+end
+
+local function checkSourceMissionTimeouts(timeoutCfg)
+    local timeoutSeconds = getMissionTimeoutSeconds(timeoutCfg, 'sourceMinutes', 10)
+    if timeoutSeconds <= 0 then
+        return
+    end
+
+    local now = os.time()
+    local timedOutSources = {}
+    for src, sourceMission in pairs(ActiveSourceMissions) do
+        local startedAt = tonumber(sourceMission and sourceMission.startedAt) or now
+        if (now - startedAt) >= timeoutSeconds then
+            timedOutSources[#timedOutSources + 1] = src
+        end
+    end
+
+    local timeoutMinutes = math.floor(timeoutSeconds / 60)
+    for _, src in ipairs(timedOutSources) do
+        if ActiveSourceMissions[src] then
+            clearSourceMissionForSource(src, true)
+            notifyPlayer(src, ('Beschaffungsmission nach %s Minuten automatisch abgebrochen.'):format(timeoutMinutes), 'error')
+            TriggerClientEvent('warehouse:client:sourceMissionTimedOut', src)
+        end
+    end
+end
+
+local function checkSellMissionTimeouts(timeoutCfg)
+    local timeoutSeconds = getMissionTimeoutSeconds(timeoutCfg, 'sellMinutes', 10)
+    if timeoutSeconds <= 0 then
+        return
+    end
+
+    local now = os.time()
+    local timedOutOwners = {}
+    for ownerKey, activeLoad in pairs(ActiveSellLoads) do
+        local startedAt = tonumber(activeLoad and activeLoad.startedAt) or now
+        if (now - startedAt) >= timeoutSeconds then
+            timedOutOwners[#timedOutOwners + 1] = ownerKey
+        end
+    end
+
+    local timeoutMinutes = math.floor(timeoutSeconds / 60)
+    for _, ownerKey in ipairs(timedOutOwners) do
+        local activeLoad = ActiveSellLoads[ownerKey]
+        if activeLoad then
+            local startedBy = activeLoad.startedBy
+            local returned = returnSellLoadToWarehouse(ownerKey)
+            if not returned then
+                clearSellLoadForOwner(ownerKey)
+            end
+
+            if startedBy then
+                if returned then
+                    notifyPlayer(startedBy, ('Verkaufsmission nach %s Minuten automatisch abgebrochen. Ware wurde ins Lager zurückgelegt.'):format(timeoutMinutes), 'error')
+                else
+                    notifyPlayer(startedBy, ('Verkaufsmission nach %s Minuten automatisch abgebrochen. Ware konnte nicht vollständig zurückgelegt werden.'):format(timeoutMinutes), 'error')
+                end
+                TriggerClientEvent('warehouse:client:sellMissionTimedOut', startedBy)
+            end
+        end
+    end
 end
 
 local function isAdmin(source)
@@ -702,6 +821,27 @@ CreateThread(function()
     LoadAllWarehouses()
 end)
 
+CreateThread(function()
+    while true do
+        local timeoutCfg = (Config.Mission and Config.Mission.timeout) or {}
+        local checkInterval = tonumber(timeoutCfg.checkIntervalMs) or 5000
+        if checkInterval < 1000 then
+            checkInterval = 1000
+        end
+
+        Wait(checkInterval)
+
+        if timeoutCfg.enabled == false then
+            goto continue
+        end
+
+        checkSourceMissionTimeouts(timeoutCfg)
+        checkSellMissionTimeouts(timeoutCfg)
+
+        ::continue::
+    end
+end)
+
 function LoadAllWarehouses()
     MySQL.Async.fetchAll('SELECT * FROM player_warehouses', {}, function(result)
         for _, row in ipairs(result) do
@@ -801,6 +941,106 @@ AddEventHandler('warehouse:server:purchase', function(warehouseId)
     TriggerClientEvent('warehouse:client:purchaseSuccess', src, warehouseId)
     broadcastFactionWarehouse(warehouseId)
     TriggerEvent('warehouse:server:log', src, 'Lagerhaus gekauft: ' .. warehouse.name .. ' für $' .. warehouse.price)
+end)
+
+RegisterNetEvent('warehouse:server:sellWarehouse')
+AddEventHandler('warehouse:server:sellWarehouse', function(warehouseId)
+    local src = source
+    local Player = ESX.GetPlayerFromId(src)
+    if not Player then
+        return
+    end
+
+    local saleCfg = Config.WarehouseSale or {}
+    if saleCfg.enabled == false then
+        notifyPlayer(src, 'Der Lagerhaus-Verkauf ist deaktiviert.', 'error')
+        return
+    end
+
+    if not IsIronUnionMember(Player) then
+        notifyNotFaction(src)
+        return
+    end
+
+    local ownerKey = getWarehouseOwnerKey(Player)
+    if not ownerKey then
+        notifyNotFaction(src)
+        return
+    end
+
+    local ownedWarehouse = Warehouses[ownerKey]
+    if not ownedWarehouse then
+        notifyPlayer(src, 'Deine Fraktion besitzt kein Lagerhaus.', 'error')
+        return
+    end
+
+    if warehouseId and ownedWarehouse.id ~= warehouseId then
+        notifyPlayer(src, 'Ungültiges Lagerhaus.', 'error')
+        return
+    end
+
+    local blockDuringMissions = saleCfg.blockDuringMissions ~= false
+    if blockDuringMissions then
+        if ActiveSellLoads[ownerKey] then
+            notifyPlayer(src, 'Verkaufsmission aktiv. Verkaufe erst nach Abschluss oder Abbruch.', 'error')
+            return
+        end
+
+        local hasSourceMission = hasActiveSourceMissionForOwner(ownerKey)
+        if hasSourceMission then
+            notifyPlayer(src, 'Beschaffungsmission aktiv. Verkaufe erst nach Abschluss oder Abbruch.', 'error')
+            return
+        end
+    else
+        if ActiveSellLoads[ownerKey] then
+            local returned = returnSellLoadToWarehouse(ownerKey)
+            if not returned then
+                notifyPlayer(src, 'Aktive Verkaufsfracht konnte nicht sicher zurückgelegt werden.', 'error')
+                return
+            end
+        end
+
+        clearSourceMissionsForOwner(ownerKey, true)
+    end
+
+    local _, totalCrates = getCargoInventoryForOwner(ownerKey)
+    local requireEmpty = saleCfg.requireEmpty ~= false
+    if requireEmpty and totalCrates > 0 then
+        notifyPlayer(src, ('Lagerhaus muss leer sein. Noch %s Kisten eingelagert.'):format(totalCrates), 'error')
+        return
+    end
+
+    local warehouseCfg = Config.Warehouses[ownedWarehouse.id]
+    local basePrice = warehouseCfg and warehouseCfg.price or 0
+    local refundPercent = tonumber(saleCfg.refundPercent) or 0.5
+    if refundPercent < 0 then
+        refundPercent = 0
+    end
+    local refundAmount = math.floor(basePrice * refundPercent)
+
+    if refundAmount > 0 then
+        local paid = payoutWarehouseSale(Player, refundAmount)
+        if not paid then
+            notifyPlayer(src, 'ESX Geld-Funktion fehlt (addMoney/addAccountMoney).', 'error')
+            return
+        end
+    end
+
+    Warehouses[ownerKey] = nil
+    clearSellLoadForOwner(ownerKey)
+    clearWarehouseStash(ownerKey)
+    MySQL.Async.execute('DELETE FROM player_warehouses WHERE citizenid = ?', { ownerKey })
+
+    broadcastFactionWarehouse(nil)
+
+    if refundAmount > 0 then
+        notifyPlayer(src, ('Lagerhaus verkauft. Rückerstattung: $%s'):format(formatNumber(refundAmount)), 'success')
+    else
+        notifyPlayer(src, 'Lagerhaus verkauft.', 'success')
+    end
+
+    local warehouseName = (warehouseCfg and warehouseCfg.name) or tostring(ownedWarehouse.id)
+    TriggerEvent('warehouse:server:log', src, ('Lagerhaus verkauft: %s (Refund: $%s)'):format(warehouseName, formatNumber(refundAmount)))
 end)
 
 -- Lagerhaus-Inventar abrufen

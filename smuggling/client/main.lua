@@ -83,6 +83,21 @@ local function getDispatchChanceMultiplier(dispatchType)
     return multiplier
 end
 
+local function getWarehouseSellRefund(warehouseId)
+    local warehouse = Config.Warehouses[warehouseId]
+    if not warehouse then
+        return 0
+    end
+
+    local saleCfg = Config.WarehouseSale or {}
+    local percent = tonumber(saleCfg.refundPercent) or 0.5
+    if percent < 0 then
+        percent = 0
+    end
+
+    return math.floor((warehouse.price or 0) * percent)
+end
+
 -- Check if player is Iron Union member
 function IsIronUnionMember()
     local Player = ESX.GetPlayerData()
@@ -111,6 +126,37 @@ local function DeleteVehicleSafe(vehicle)
     if vehicle and DoesEntityExist(vehicle) then
         DeleteEntity(vehicle)
     end
+end
+
+local function ResetSourceMissionState()
+    RemoveBlip(WarehouseSmuggling.missionBlip)
+    RemoveBlip(WarehouseSmuggling.returnBlip)
+    RemoveZone(sourceTargetZone)
+    sourceTargetZone = nil
+    RemoveZone(returnTargetZone)
+    returnTargetZone = nil
+    DeleteVehicleSafe(WarehouseSmuggling.cargoVehicle)
+    WarehouseSmuggling.cargoVehicle = nil
+    WarehouseSmuggling.isSourcing = false
+    WarehouseSmuggling.sourceMissionData = nil
+    WarehouseSmuggling.pendingSourceMission = nil
+    WarehouseSmuggling.pendingSourceAuth = false
+    WarehouseSmuggling.pendingCollect = false
+    WarehouseSmuggling.pendingStore = false
+end
+
+local function ResetSellMissionState()
+    RemoveBlip(WarehouseSmuggling.sellBlip)
+    RemoveZone(sellTargetZone)
+    sellTargetZone = nil
+    DeleteVehicleSafe(WarehouseSmuggling.sellDeliveryVehicle)
+    WarehouseSmuggling.sellDeliveryVehicle = nil
+    WarehouseSmuggling.isSelling = false
+    WarehouseSmuggling.pendingSellLoad = nil
+    WarehouseSmuggling.pendingSellComplete = false
+    WarehouseSmuggling.hasHighRiskCargo = false
+    WarehouseSmuggling.maxRiskLevel = 0
+    WarehouseSmuggling.policeChance = nil
 end
 
 local function OpenWarehouseManagement(warehouseId)
@@ -233,6 +279,42 @@ function OpenWarehouseSaleMenu()
     OpenWarehouseInterior(WarehouseSmuggling.currentWarehouse)
 end
 
+function OpenWarehouseSellMenu(totalCrates)
+    if not WarehouseSmuggling.currentWarehouse then
+        Notify('Du besitzt kein Lagerhaus.', 'error')
+        return
+    end
+
+    if WarehouseSmuggling.isSourcing or WarehouseSmuggling.isSelling or WarehouseSmuggling.pendingSellLoad or WarehouseSmuggling.pendingSourceAuth then
+        Notify('Während einer aktiven Mission kann kein Lagerhaus verkauft werden.', 'error')
+        return
+    end
+
+    local saleCfg = Config.WarehouseSale or {}
+    local requireEmpty = saleCfg.requireEmpty ~= false
+    local refund = getWarehouseSellRefund(WarehouseSmuggling.currentWarehouse)
+    local content = 'Möchtest du dieses Lagerhaus wirklich verkaufen?\n\nRückerstattung: $' .. formatNumber(refund)
+
+    if requireEmpty then
+        content = content .. '\nVoraussetzung: Lagerhaus muss leer sein.'
+    end
+
+    if (tonumber(totalCrates) or 0) > 0 then
+        content = content .. '\nAktuell eingelagert: ' .. tostring(totalCrates) .. ' Kisten'
+    end
+
+    local alert = lib.alertDialog({
+        header = 'Lagerhaus verkaufen',
+        content = content,
+        centered = true,
+        cancel = true
+    })
+
+    if alert == 'confirm' then
+        TriggerServerEvent('warehouse:server:sellWarehouse', WarehouseSmuggling.currentWarehouse)
+    end
+end
+
 RegisterNetEvent('warehouse:client:openMenu')
 AddEventHandler('warehouse:client:openMenu', function(inventory, stats)
     local options = {}
@@ -282,6 +364,18 @@ AddEventHandler('warehouse:client:openMenu', function(inventory, stats)
             icon = 'money-bill',
             onSelect = function()
                 OpenSellMissionMenu()
+            end
+        })
+    end
+
+    local saleCfg = Config.WarehouseSale or {}
+    if saleCfg.enabled ~= false then
+        table.insert(options, {
+            title = 'Lagerhaus verkaufen',
+            description = 'Rückerstattung: $' .. formatNumber(getWarehouseSellRefund(WarehouseSmuggling.currentWarehouse)),
+            icon = 'warehouse',
+            onSelect = function()
+                OpenWarehouseSellMenu(totalCrates)
             end
         })
     end
@@ -547,7 +641,6 @@ AddEventHandler('warehouse:client:collectCargoResult', function(success, collect
         local chance = math.min(1.0, mission.policeChance * getDispatchChanceMultiplier('source'))
         if math.random() < chance then
             TriggerServerEvent('warehouse:server:alertPolice', GetEntityCoords(PlayerPedId()), 'Verdächtige Aktivität bei Ladung von ' .. Config.CargoTypes[mission.cargoType].label .. ' festgestellt!', 'source')
-            Notify('POLIZEI WURDE ALARMIERT!', 'error', sourceCfg.policeAlertNotifyDuration or 8000)
         end
     end
     
@@ -620,14 +713,7 @@ AddEventHandler('warehouse:client:storeCargoResult', function(success)
         return
     end
 
-    DeleteVehicleSafe(WarehouseSmuggling.cargoVehicle)
-    RemoveBlip(WarehouseSmuggling.returnBlip)
-    RemoveZone(returnTargetZone)
-    returnTargetZone = nil
-
-    WarehouseSmuggling.isSourcing = false
-    WarehouseSmuggling.sourceMissionData = nil
-    WarehouseSmuggling.cargoVehicle = nil
+    ResetSourceMissionState()
 end)
 
 function OpenSellMissionMenu()
@@ -797,7 +883,6 @@ function CreateSellMissionThread()
                 local highRiskChance = (WarehouseSmuggling.policeChance or sellCfg.highRiskDefaultChance or 0.001) * getDispatchChanceMultiplier('sell')
                 if math.random() < math.min(1.0, highRiskChance) then
                     TriggerServerEvent('warehouse:server:alertPolice', playerCoords, 'Verdächtiger Frachttransport unterwegs!', 'sell')
-                    Notify('POLIZEI VERFOLGT DICH!', 'error', sellCfg.policeChaseNotifyDuration or 5000)
                 end
             else
                 -- Normale Checks
@@ -853,13 +938,17 @@ AddEventHandler('warehouse:client:completeSellResult', function(success)
         return
     end
 
-    RemoveBlip(WarehouseSmuggling.sellBlip)
-    RemoveZone(sellTargetZone)
-    sellTargetZone = nil
-    WarehouseSmuggling.isSelling = false
-    WarehouseSmuggling.pendingSellLoad = nil
-    DeleteVehicleSafe(WarehouseSmuggling.sellDeliveryVehicle)
-    WarehouseSmuggling.sellDeliveryVehicle = nil
+    ResetSellMissionState()
+end)
+
+RegisterNetEvent('warehouse:client:sourceMissionTimedOut')
+AddEventHandler('warehouse:client:sourceMissionTimedOut', function()
+    ResetSourceMissionState()
+end)
+
+RegisterNetEvent('warehouse:client:sellMissionTimedOut')
+AddEventHandler('warehouse:client:sellMissionTimedOut', function()
+    ResetSellMissionState()
 end)
 
 RegisterNetEvent('warehouse:client:hasWarehouse')
