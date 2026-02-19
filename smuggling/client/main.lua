@@ -435,7 +435,7 @@ AddEventHandler('warehouse:client:sourceMissionAuth', function(success, approved
         riskLevel = pending.riskLevel,
         policeChance = pending.policeChance
     })
-end
+end)
 
 function targetCoordsFromVec4(coords)
     return vector3(coords.x, coords.y, coords.z)
